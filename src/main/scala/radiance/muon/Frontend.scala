@@ -17,6 +17,8 @@ class Frontend(implicit p: Parameters)
     val cmdProc: Option[Bundle] = None
     val softReset = Input(Bool())
     val finished = Output(Bool())
+    val discardValid = Output(Vec(muonParams.numWarps, Bool()))
+    val icacheInFlight = Output(Vec(muonParams.numWarps, Bool()))
     val perf = Output(new FrontendPerfIO)
   })
 
@@ -82,6 +84,8 @@ class Frontend(implicit p: Parameters)
     }
     warpScheduler.io.softReset := io.softReset
     io.finished := warpScheduler.io.finished
+    io.discardValid := warpScheduler.io.discardValid
+    io.icacheInFlight := warpScheduler.io.icacheInFlight
   }
 
   { // rename

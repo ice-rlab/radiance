@@ -26,6 +26,7 @@ class Execute(implicit p: Parameters) extends CoreModule()(p) {
       val instRetired = Output(Perf.T)
       val cycles =  Output(Perf.T)
     }
+    val barrierParked = Output(Vec(m.numWarps, Bool()))
   })
   
   val aluPipe = Module(new ALUPipe())
@@ -47,6 +48,7 @@ class Execute(implicit p: Parameters) extends CoreModule()(p) {
   sfuPipe.barIO <> io.barrier
   sfuPipe.flushIO <> io.flush
   sfuPipe.fenceIO := lsuPipe.flushIO
+  io.barrierParked := sfuPipe.barrierParked
 
   lsuPipe.idIO := io.id
   lsuPipe.memIO <> io.mem

@@ -28,6 +28,8 @@ class WarpScheduler(implicit p: Parameters)
     val cmdProc = cmdProcOpt.map(_ => cmdProcIO)
     val softReset = Input(Bool())
     val finished = Output(Bool())
+    val discardValid = Output(Vec(muonParams.numWarps, Bool()))
+    val icacheInFlight = Output(Vec(muonParams.numWarps, Bool()))
   })
 
   val threadMasks = RegInit(VecInit.tabulate(m.numWarps) { wid =>
@@ -209,6 +211,8 @@ class WarpScheduler(implicit p: Parameters)
   }
 
   io.finished := VecInit(pcTracker.map(!_.valid)).asUInt.andR
+  io.discardValid := discardValid
+  io.icacheInFlight := VecInit(icacheInFlights.map(_ =/= 0.U))
 
   // select warp for fetch
   fetchArbiter.io.in.zipWithIndex.foreach { case (arb, wid) =>

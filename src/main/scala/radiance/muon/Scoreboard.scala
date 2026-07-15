@@ -28,10 +28,16 @@ class ScoreboardRead(
   val pReg = Input(pRegT)
   val pendingReads = Output(UInt(readCountBits.W))
   val pendingWrites = Output(UInt(writeCountBits.W))
+  /** whether the (sole, since maxPendingWritesU==1) outstanding writer for
+   *  pReg is a memory producer; only meaningful when pendingWrites =/= 0 */
+  val pendingWritesMem = Output(Bool())
 }
 
 class ScoreboardHazardIO(implicit p: Parameters) extends CoreBundle()(p) {
   val updateRS = new ScoreboardUpdate
+  /** tags updateRS.write's producer as memory (true) or compute (false); only
+   *  meaningful when updateRS.write.incr is set */
+  val updateRSWriteIsMem = Input(Bool())
   val warps = Vec(numWarps, new Bundle {
     val readRs1  = new ScoreboardRead(scoreboardReadCountBits, scoreboardWriteCountBits)
     val readRs2  = new ScoreboardRead(scoreboardReadCountBits, scoreboardWriteCountBits)
@@ -66,6 +72,13 @@ class Scoreboard(implicit p: Parameters) extends CoreModule()(p) {
   // flip-flops
   val readTable = Mem(muonParams.numPhysRegs, UInt(scoreboardReadCountBits.W))
   val writeTable = Mem(muonParams.numPhysRegs, UInt(scoreboardWriteCountBits.W))
+  // GCStack: tags the (sole) outstanding writer for pReg as memory or
+  // compute, so a stalled consumer can classify its data-hazard stall as
+  // MemData vs ComData. Since maxPendingWritesU == 1, there's never more
+  // than one outstanding writer, so this only needs to be set on admission
+  // (not explicitly cleared) -- consumers only ever read it when
+  // pendingWrites =/= 0, same convention pendingWrites itself relies on.
+  val memPendingTable = Mem(muonParams.numPhysRegs, Bool())
 
   // reset
   // TODO: @synthesis: this blows up the number of write ports.
@@ -74,6 +87,7 @@ class Scoreboard(implicit p: Parameters) extends CoreModule()(p) {
     (0 until muonParams.numPhysRegs).foreach { pReg =>
       readTable(pReg) := 0.U
       writeTable(pReg) := 0.U
+      memPendingTable(pReg) := false.B
     }
   }
 
@@ -282,6 +296,11 @@ class Scoreboard(implicit p: Parameters) extends CoreModule()(p) {
 
   io.hazard.updateRS.success := io.hazard.updateRS.enable && rsSuccess
 
+  when (io.hazard.updateRS.enable && rsSuccess &&
+        io.hazard.updateRS.write.incr && io.hazard.updateRS.write.pReg =/= 0.U) {
+    memPendingTable(io.hazard.updateRS.write.pReg) := io.hazard.updateRSWriteIsMem
+  }
+
   when (io.hazard.updateRS.enable) {
     debugf(cf"scoreboard: received RS update ")
     printUpdate(io.hazard.updateRS)
@@ -329,6 +348,7 @@ class Scoreboard(implicit p: Parameters) extends CoreModule()(p) {
     def read(port: ScoreboardRead) = {
       port.pendingReads := 0.U
       port.pendingWrites := 0.U
+      port.pendingWritesMem := false.B
       when (port.enable) {
         // using lookup here enables bypassing same-cycle updates to reads to the
         // same pReg
@@ -336,6 +356,7 @@ class Scoreboard(implicit p: Parameters) extends CoreModule()(p) {
         // combinational cycle with the RS admission logic in the Hazard module
         port.pendingReads  := lookup(collRecs, port.pReg, isWrite = false)._2._1
         port.pendingWrites := lookup(wbRecs, port.pReg, isWrite = true)._2._1
+        port.pendingWritesMem := memPendingTable(port.pReg)
       }
     }
     read(io.hazard.warps(warpId).readRs1)

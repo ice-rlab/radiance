@@ -692,6 +692,14 @@ void profile_perf_counters_rs(
     const uint64_t* per_warp_stalls_scoreboard,
     const uint64_t* per_warp_stalls_busy,
     const uint64_t* per_warp_stalls_busy_lsu,
+    const uint64_t* per_warp_unoccupied,
+    const uint64_t* per_warp_idle,
+    const uint64_t* per_warp_ifetch,
+    const uint64_t* per_warp_control,
+    const uint64_t* per_warp_sync,
+    const uint64_t* per_warp_mem_data,
+    const uint64_t* per_warp_com_data,
+    const uint64_t* per_warp_struct,
     uint8_t finished
 );
 
@@ -710,6 +718,14 @@ void profile_perf_counters(
     const uint64_t* per_warp_stalls_scoreboard,
     const uint64_t* per_warp_stalls_busy,
     const uint64_t* per_warp_stalls_busy_lsu,
+    const uint64_t* per_warp_unoccupied,
+    const uint64_t* per_warp_idle,
+    const uint64_t* per_warp_ifetch,
+    const uint64_t* per_warp_control,
+    const uint64_t* per_warp_sync,
+    const uint64_t* per_warp_mem_data,
+    const uint64_t* per_warp_com_data,
+    const uint64_t* per_warp_struct,
     uint8_t finished
 ) {
   profile_perf_counters_rs(
@@ -717,7 +733,10 @@ void profile_perf_counters(
       cycles_issued, per_warp_cycles_decoded, per_warp_cycles_issued,
       per_warp_stalls_waw, per_warp_stalls_war, per_warp_stalls_scoreboard,
       per_warp_stalls_busy,
-      per_warp_stalls_busy_lsu, finished);
+      per_warp_stalls_busy_lsu,
+      per_warp_unoccupied, per_warp_idle, per_warp_ifetch, per_warp_control,
+      per_warp_sync, per_warp_mem_data, per_warp_com_data, per_warp_struct,
+      finished);
 }
 
 } // extern "C"

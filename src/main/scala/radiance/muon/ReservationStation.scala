@@ -14,6 +14,9 @@ class ReservationStationEntry(implicit p: Parameters) extends CoreBundle()(p) {
    *  in-flight instruction in the backend. `busy == 1` means the operand can be
    *  potentially forwarded from EX. */
   val busy = Vec(Isa.maxNumRegs, Bool())
+  /** GCStack: whether the outstanding producer for busy(i) is a memory op.
+   *  Only meaningful where busy(i) is set. */
+  val busyMem = Vec(Isa.maxNumRegs, Bool())
 }
 
 class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
@@ -35,6 +38,13 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
       val readResp = Flipped(CollectorResponse(Isa.maxNumRegs, isWrite = false))
       val readData = Flipped(new CollectorOperandRead)
     }
+    /** GCStack: per-warp reduction over this cycle's RS rows, for stall
+     *  classification. */
+    val perWarp = Output(Vec(numWarps, new Bundle {
+      val hasEntry = Bool()
+      val memBlocked = Bool()
+      val dataBlocked = Bool()
+    }))
   })
 
   val numEntries = muonParams.numIssueQueueEntries
@@ -55,6 +65,8 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
   val opReadyTable   = Mem(numEntries, Vec(Isa.maxNumRegs, Bool()))
   // whether the operands are being written-to by in-flight insts in EX
   val busyTable      = Mem(numEntries, Vec(Isa.maxNumRegs, Bool()))
+  // GCStack: whether each busy operand's outstanding producer is a memory op
+  val busyMemTable   = Mem(numEntries, Vec(Isa.maxNumRegs, Bool()))
   // whether the operands are currently being collected
   // a partial set of hasOpTable; not all of the operands can be collected at
   // once
@@ -105,12 +117,28 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
     instTable(emptyRow)  := io.admit.bits.ibufEntry
     opReadyTable(emptyRow) := io.admit.bits.valid
     busyTable(emptyRow)  := io.admit.bits.busy
+    busyMemTable(emptyRow) := io.admit.bits.busyMem
     collFiredTable(emptyRow) := VecInit.fill(Isa.maxNumRegs)(false.B)
     collPtrTable(emptyRow) := 0.U
 
     debugf(cf"RS: admitted: warp=${io.admit.bits.ibufEntry.uop.wid}, " +
            cf"PC=${io.admit.bits.ibufEntry.uop.pc}%x at row ${emptyRow}\n")
     printTable
+  }
+
+  // GCStack: reduce the row-indexed tables down to a per-warp summary, for
+  // stall classification in Backend. Approximation: any busy row counts,
+  // rather than specifically the oldest un-issued row (age order isn't
+  // tracked cheaply here).
+  (0 until numWarps).foreach { wid =>
+    val rowsForWarp = (0 until numEntries).map(i => validTable(i) && (instTable(i).uop.wid === wid.U))
+    val rowMemBlocked = (0 until numEntries).map(i => rowsForWarp(i) && busyMemTable(i).reduce(_ || _))
+    val rowDataBlocked = (0 until numEntries).map { i =>
+      rowsForWarp(i) && busyTable(i).reduce(_ || _) && !busyMemTable(i).reduce(_ || _)
+    }
+    io.perWarp(wid).hasEntry := VecInit(rowsForWarp).asUInt.orR
+    io.perWarp(wid).memBlocked := VecInit(rowMemBlocked).asUInt.orR
+    io.perWarp(wid).dataBlocked := VecInit(rowDataBlocked).asUInt.orR
   }
 
   val rsOccupancy = WireDefault(PopCount(validTable))

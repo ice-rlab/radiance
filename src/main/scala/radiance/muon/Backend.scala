@@ -20,6 +20,8 @@ class Backend(implicit p: Parameters) extends CoreModule()(p) {
     val softReset = Input(Bool())
     val perf = Output(new BackendPerfIO)
     val trace = Option.when(muonParams.trace)(Valid(new InstTraceIO))
+    val discardValid = Input(Vec(muonParams.numWarps, Bool()))
+    val icacheInFlight = Input(Vec(muonParams.numWarps, Bool()))
   })
 
   // -----
@@ -70,6 +72,10 @@ class Backend(implicit p: Parameters) extends CoreModule()(p) {
     p.stallsWAW := h.stallsWAW
     p.stallsWAR := h.stallsWAR
     p.stallsScoreboard := h.stallsScoreboard
+  }
+  // wmask bit is pcTracker(wid).valid, forwarded from WarpScheduler via the CSR path
+  (io.perf.perWarp zip io.feCSR.wmask.asBools).foreach { case (p, occupied) =>
+    p.unoccupied := PerfCounter(!occupied)
   }
 
   // -----------------
@@ -140,6 +146,43 @@ class Backend(implicit p: Parameters) extends CoreModule()(p) {
       val ibufIsLSU = io.ibuf(wid).valid && io.ibuf(wid).bits.uop.inst.b(UseLSUPipe)
       val lsuStalled = (ibufIsLSU || reserv.req.valid) && !reserv.req.ready
       p.stallsBusyLSU := PerfCounter(lsuStalled)
+  }
+
+  // GCStack-style per-warp stall classification (Philosophy B): every
+  // resident-or-not warp lands in exactly one bucket per cycle, picked by
+  // this priority chain (top condition wins). `unoccupied` (bucket 0) and
+  // `cyclesIssued`/base (bucket 1) are already wired above by their own
+  // counters; this block only drives the remaining six fields.
+  io.perf.perWarp.zipWithIndex.foreach { case (p, wid) =>
+    val resident      = io.feCSR.wmask(wid)
+    val issuedThisCyc = issued.fire && (issued.bits.uop.wid === wid.U)
+    val ibufEmpty     = !io.ibuf(wid).valid
+    val structBlocked = io.ibuf(wid).valid && !io.ibuf(wid).ready
+
+    val discardValid  = io.discardValid(wid)
+    val icacheInFlight = io.icacheInFlight(wid)
+    val barrierParked  = execute.io.barrierParked(wid)
+    val memBlocked     = reservStation.io.perWarp(wid).memBlocked
+    val dataBlocked    = reservStation.io.perWarp(wid).dataBlocked
+
+    val bucket = WireDefault(0.U(4.W))
+    when      (!resident)                   { bucket := 0.U }
+    .elsewhen (issuedThisCyc)                { bucket := 1.U }
+    .elsewhen (discardValid)                 { bucket := 2.U }
+    .elsewhen (barrierParked)                { bucket := 3.U }
+    .elsewhen (ibufEmpty && icacheInFlight)   { bucket := 4.U }
+    .elsewhen (ibufEmpty)                     { bucket := 5.U }
+    .elsewhen (memBlocked)                    { bucket := 6.U }
+    .elsewhen (dataBlocked)                   { bucket := 7.U }
+    .elsewhen (structBlocked)                 { bucket := 8.U }
+
+    p.control := PerfCounter(bucket === 2.U)
+    p.sync    := PerfCounter(bucket === 3.U)
+    p.ifetch  := PerfCounter(bucket === 4.U)
+    p.idle    := PerfCounter(bucket === 5.U)
+    p.memData := PerfCounter(bucket === 6.U)
+    p.comData := PerfCounter(bucket === 7.U)
+    p.struct  := PerfCounter(bucket === 8.U)
   }
 
   if (noILP) {
@@ -320,5 +363,21 @@ class BackendPerfIO(implicit p: Parameters) extends CoreBundle()(p) {
     val stallsScoreboard = Perf.T
     val stallsBusy = Perf.T
     val stallsBusyLSU = Perf.T
+    /** cycles this warp slot had no resident warp (bucket 0 of the stall stack) */
+    val unoccupied = Perf.T
+    /** resident, but no decoded/in-flight instruction anywhere for this warp */
+    val idle = Perf.T
+    /** resident, no decoded instruction because the front end hasn't delivered one yet */
+    val ifetch = Perf.T
+    /** blocked on branch resolution / reconvergence (discard mode, IPDOM push/pop) */
+    val control = Perf.T
+    /** parked at a barrier */
+    val sync = Perf.T
+    /** blocked on an outstanding memory producer */
+    val memData = Perf.T
+    /** blocked on an outstanding compute producer */
+    val comData = Perf.T
+    /** ready to issue but blocked on a resource (RS/collector/IBUF backpressure) */
+    val struct = Perf.T
   })
 }

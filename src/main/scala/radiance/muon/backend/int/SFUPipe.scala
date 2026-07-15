@@ -27,6 +27,7 @@ class SFUPipe(implicit p: Parameters) extends ExPipe(true, true) {
   val fenceIO = IO(Flipped(lsuFenceIO))
   val flushIO = IO(cacheFlushIO)
   val barIO = IO(barrierIO)
+  val barrierParked = IO(Output(Vec(m.numWarps, Bool())))
   // to fix scala lsp issues
   val barReqT = barIO.req.bits.cloneType.asInstanceOf[barIO.req.bits.type]
 
@@ -78,6 +79,7 @@ class SFUPipe(implicit p: Parameters) extends ExPipe(true, true) {
       reqT = barReqT
     )
   }
+  barrierParked := VecInit(barriers.map(_.inProgress.valid))
 
   val fences = Seq(
     new StallFields(

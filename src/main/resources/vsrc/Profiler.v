@@ -18,7 +18,15 @@ module ProfilerBlackBox #(
   input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_stallsWAR,
   input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_stallsScoreboard,
   input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_stallsBusy,
-  input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_stallsBusyLSU
+  input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_stallsBusyLSU,
+  input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_unoccupied,
+  input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_idle,
+  input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_ifetch,
+  input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_control,
+  input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_sync,
+  input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_memData,
+  input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_comData,
+  input logic [(NUM_WARPS*COUNTER_WIDTH)-1:0] perWarp_struct
 );
 
   `include "Cyclotron.vh"
@@ -30,6 +38,14 @@ module ProfilerBlackBox #(
   longint per_warp_stalls_scoreboard [0:NUM_WARPS-1];
   longint per_warp_stalls_busy [0:NUM_WARPS-1];
   longint per_warp_stalls_busy_lsu [0:NUM_WARPS-1];
+  longint per_warp_unoccupied [0:NUM_WARPS-1];
+  longint per_warp_idle [0:NUM_WARPS-1];
+  longint per_warp_ifetch [0:NUM_WARPS-1];
+  longint per_warp_control [0:NUM_WARPS-1];
+  longint per_warp_sync [0:NUM_WARPS-1];
+  longint per_warp_mem_data [0:NUM_WARPS-1];
+  longint per_warp_com_data [0:NUM_WARPS-1];
+  longint per_warp_struct [0:NUM_WARPS-1];
 
   genvar i;
   generate
@@ -41,6 +57,14 @@ module ProfilerBlackBox #(
       assign per_warp_stalls_scoreboard[i] = perWarp_stallsScoreboard[i*COUNTER_WIDTH +: COUNTER_WIDTH];
       assign per_warp_stalls_busy[i] = perWarp_stallsBusy[i*COUNTER_WIDTH +: COUNTER_WIDTH];
       assign per_warp_stalls_busy_lsu[i] = perWarp_stallsBusyLSU[i*COUNTER_WIDTH +: COUNTER_WIDTH];
+      assign per_warp_unoccupied[i] = perWarp_unoccupied[i*COUNTER_WIDTH +: COUNTER_WIDTH];
+      assign per_warp_idle[i] = perWarp_idle[i*COUNTER_WIDTH +: COUNTER_WIDTH];
+      assign per_warp_ifetch[i] = perWarp_ifetch[i*COUNTER_WIDTH +: COUNTER_WIDTH];
+      assign per_warp_control[i] = perWarp_control[i*COUNTER_WIDTH +: COUNTER_WIDTH];
+      assign per_warp_sync[i] = perWarp_sync[i*COUNTER_WIDTH +: COUNTER_WIDTH];
+      assign per_warp_mem_data[i] = perWarp_memData[i*COUNTER_WIDTH +: COUNTER_WIDTH];
+      assign per_warp_com_data[i] = perWarp_comData[i*COUNTER_WIDTH +: COUNTER_WIDTH];
+      assign per_warp_struct[i] = perWarp_struct[i*COUNTER_WIDTH +: COUNTER_WIDTH];
     end
   endgenerate
 
@@ -59,6 +83,14 @@ module ProfilerBlackBox #(
     input longint per_warp_stalls_scoreboard[NUM_WARPS],
     input longint per_warp_stalls_busy[NUM_WARPS],
     input longint per_warp_stalls_busy_lsu[NUM_WARPS],
+    input longint per_warp_unoccupied[NUM_WARPS],
+    input longint per_warp_idle[NUM_WARPS],
+    input longint per_warp_ifetch[NUM_WARPS],
+    input longint per_warp_control[NUM_WARPS],
+    input longint per_warp_sync[NUM_WARPS],
+    input longint per_warp_mem_data[NUM_WARPS],
+    input longint per_warp_com_data[NUM_WARPS],
+    input longint per_warp_struct[NUM_WARPS],
     input bit     finished
   );
 
@@ -82,6 +114,14 @@ module ProfilerBlackBox #(
         per_warp_stalls_scoreboard,
         per_warp_stalls_busy,
         per_warp_stalls_busy_lsu,
+        per_warp_unoccupied,
+        per_warp_idle,
+        per_warp_ifetch,
+        per_warp_control,
+        per_warp_sync,
+        per_warp_mem_data,
+        per_warp_com_data,
+        per_warp_struct,
         finished
       );
     end

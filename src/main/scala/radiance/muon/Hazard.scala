@@ -81,6 +81,9 @@ class Hazard(implicit p: Parameters) extends CoreModule()(p) {
     rsEntry.busy(0) := hasRs1 && (scbPort.readRs1.pendingWrites =/= 0.U)
     rsEntry.busy(1) := hasRs2 && (scbPort.readRs2.pendingWrites =/= 0.U)
     rsEntry.busy(2) := hasRs3 && (scbPort.readRs3.pendingWrites =/= 0.U)
+    rsEntry.busyMem(0) := rsEntry.busy(0) && scbPort.readRs1.pendingWritesMem
+    rsEntry.busyMem(1) := rsEntry.busy(1) && scbPort.readRs2.pendingWritesMem
+    rsEntry.busyMem(2) := rsEntry.busy(2) && scbPort.readRs3.pendingWritesMem
 
     rsAdmit
   }
@@ -110,6 +113,7 @@ class Hazard(implicit p: Parameters) extends CoreModule()(p) {
     read.incr := false.B
     read.decr := false.B
   }
+  io.scb.updateRSWriteIsMem := false.B
 
   // update scoreboard upon RS admission
   // This must be done at the same cycle as scoreboard read, so that the updated
@@ -131,6 +135,7 @@ class Hazard(implicit p: Parameters) extends CoreModule()(p) {
     // RS admission always increments
     io.scb.updateRS.write.incr := hasRd
     io.scb.updateRS.write.decr := false.B
+    io.scb.updateRSWriteIsMem := chosenUop.inst.b(UseLSUPipe)
     (io.scb.updateRS.reads zip (hasRss zip rss)).foreach { case (read, (hasRs, rs)) =>
       read.pReg := rs
       read.incr := hasRs

@@ -366,6 +366,8 @@ class MuonCore(implicit p: Parameters) extends CoreModule {
   be.io.softReset := io.softReset
   be.reset := reset.asBool || io.softReset
   be.io.trace.foreach(_ <> io.trace.get)
+  be.io.discardValid := fe.io.discardValid
+  be.io.icacheInFlight := fe.io.icacheInFlight
   io.perf.frontend <> fe.io.perf
   io.perf.backend <> be.io.perf
 

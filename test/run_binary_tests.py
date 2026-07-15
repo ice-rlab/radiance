@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run ELF binary tests via the VCS simulator."""
+"""Run ELF binary tests via the Verilator simulator."""
 
 import argparse
 import json
@@ -165,22 +165,29 @@ def extract_ipc_results(log_path: Path) -> list[dict[str, object]]:
     return (cycles_results, ipc_results)
 
 def get_and_check_sim_binary(config, sim_dir):
+    # NOTE: these binary names are a straight port of the VCS naming
+    # ("simv-..." -> "simulator-...", "-debug" suffix dropped since that's a
+    # VCS-only debug-build convention). Verify these against the actual
+    # binaries produced by `make` in sims/verilator -- config class names
+    # (e.g. whether "soc" really builds "...SimTraceConfig" vs a plain
+    # "...SimConfig") may differ from the VCS build. Run `ls sims/verilator/`
+    # and adjust these strings if they don't match.
     if config == "soc":
-        sim_binary = sim_dir / "simv-chipyard.harness-RadianceTapeoutSimTraceConfig-debug"
+        sim_binary = sim_dir / "simulator-chipyard.harness-RadianceTapeoutSimConfig"
     elif config == "core":
-        sim_binary = sim_dir / "simv-chipyard.unittest-MuonCoreTestConfig-debug"
+        sim_binary = sim_dir / "simulator-chipyard.unittest-MuonCoreTestConfig"
     elif config == "cosim":
-        sim_binary = sim_dir / "simv-chipyard.harness-RadianceCyclotronConfig-debug"
+        sim_binary = sim_dir / "simulator-chipyard.harness-RadianceCyclotronConfig"
     elif config == "tethered":
-        sim_binary = sim_dir / "simv-chipyard.harness-TetheredRadianceTapeoutConfig-debug"
+        sim_binary = sim_dir / "simulator-chipyard.harness-TetheredRadianceTapeoutConfig"
     elif config == "backend":
-        sim_binary = sim_dir / "simv-chipyard.unittest-MuonBackendTestConfig-debug"
+        sim_binary = sim_dir / "simulator-chipyard.unittest-MuonBackendTestConfig"
     else:
         assert False, "unknown config"
 
     p = Path(sim_binary)
     if not p.exists():
-        print("error: VCS binary not found at {}.  Have you make'd in Chipyard?" \
+        print("error: Verilator binary not found at {}.  Have you make'd in Chipyard?" \
               .format(p.resolve()))
         sys.exit(1)
 
@@ -190,7 +197,13 @@ def get_and_check_sim_binary(config, sim_dir):
 def launch_test(config, binary, elf, log_dir, chipyard_dir, sim_dir):
     elf = Path(elf).resolve()
     elf_name = elf.name
-    fsdb_path = log_dir / f"{elf_name}.fsdb"
+    # Verilator has no native FSDB writer (that's a Synopsys/Verdi format
+    # tied to VCS). If your harness dumps waveforms, it's most likely VCD
+    # or FST -- confirm the extension and the plusarg name your TestHarness
+    # actually parses (search the harness/testbench sources for "PlusArg"
+    # or "waveform"/"trace" if unsure); this may need to be `+waveform=`,
+    # `+vcdfile=`, or nothing at all if the dump path is fixed at compile time.
+    waveform_path = log_dir / f"{elf_name}.vcd"
     log_path = log_dir / f"{elf_name}.log"
     out_path = log_dir / f"{elf_name}.out"
     sqlite_path = (log_dir / f"{elf_name}.sqlite").resolve()
@@ -211,9 +224,15 @@ def launch_test(config, binary, elf, log_dir, chipyard_dir, sim_dir):
         "+dramsim",
         f"+dramsim_ini_dir={dramsim_ini}",
         "+max-cycles=10000000",
-        "+ntb_random_seed_automatic",
+        # NOTE: +ntb_random_seed_automatic was dropped -- it's a Synopsys/VCS
+        # "Native Testbench" plusarg with no Verilator equivalent. Your
+        # Verilator binary already bakes randomization in at compile time via
+        # the RANDOMIZE_MEM_INIT / RANDOMIZE_REG_INIT / RANDOMIZE_GARBAGE_ASSIGN
+        # / RANDOMIZE_INVALID_ASSIGN defines, so no runtime flag is needed for
+        # equivalent behavior. If you want a specific seed, Verilator's own
+        # convention is `+verilator+seed+<N>`.
         "+verbose",
-        f"+fsdbfile={fsdb_path}",
+        f"+waveform={waveform_path}",
         f"+trace-db={sqlite_path}",
         f"+loadmem={elf}",
         "+permissive-off",
@@ -499,7 +518,7 @@ def parse_args():
         description=(
             "Run integration tests on the RTL using ELF binaries.\n"
             "ELF binaries can either be given explicitly, or searched in the filesystem to do a sweep.\n"
-            "Requires VCS simulation binary to be built."
+            "Requires Verilator simulation binary to be built."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
@@ -530,7 +549,7 @@ def main():
 
     script_dir = Path(__file__).resolve().parent
     chipyard_dir = discover_chipyard(script_dir)
-    sim_dir = chipyard_dir / "sims/vcs"
+    sim_dir = chipyard_dir / "sims/verilator"
     log_dir_base = Path(args.log_dir)
     if not log_dir_base.is_absolute():
         log_dir_base = script_dir / log_dir_base

@@ -593,6 +593,14 @@ extends CoreModule {
   bbox.io.perWarp_stallsScoreboard := VecInit(io.perf.backend.perWarp.map(_.stallsScoreboard)).asUInt
   bbox.io.perWarp_stallsBusy := VecInit(io.perf.backend.perWarp.map(_.stallsBusy)).asUInt
   bbox.io.perWarp_stallsBusyLSU := VecInit(io.perf.backend.perWarp.map(_.stallsBusyLSU)).asUInt
+  bbox.io.perWarp_unoccupied := VecInit(io.perf.backend.perWarp.map(_.unoccupied)).asUInt
+  bbox.io.perWarp_idle := VecInit(io.perf.backend.perWarp.map(_.idle)).asUInt
+  bbox.io.perWarp_ifetch := VecInit(io.perf.backend.perWarp.map(_.ifetch)).asUInt
+  bbox.io.perWarp_control := VecInit(io.perf.backend.perWarp.map(_.control)).asUInt
+  bbox.io.perWarp_sync := VecInit(io.perf.backend.perWarp.map(_.sync)).asUInt
+  bbox.io.perWarp_memData := VecInit(io.perf.backend.perWarp.map(_.memData)).asUInt
+  bbox.io.perWarp_comData := VecInit(io.perf.backend.perWarp.map(_.comData)).asUInt
+  bbox.io.perWarp_struct := VecInit(io.perf.backend.perWarp.map(_.struct)).asUInt
 
   class ProfilerBlackBox()(implicit val p: Parameters)
   extends BlackBox(Map(
@@ -617,6 +625,14 @@ extends CoreModule {
       val perWarp_stallsScoreboard = Input(UInt((muonParams.numWarps * Perf.counterWidth).W))
       val perWarp_stallsBusy = Input(UInt((muonParams.numWarps * Perf.counterWidth).W))
       val perWarp_stallsBusyLSU = Input(UInt((muonParams.numWarps * Perf.counterWidth).W))
+      val perWarp_unoccupied = Input(UInt((muonParams.numWarps * Perf.counterWidth).W))
+      val perWarp_idle = Input(UInt((muonParams.numWarps * Perf.counterWidth).W))
+      val perWarp_ifetch = Input(UInt((muonParams.numWarps * Perf.counterWidth).W))
+      val perWarp_control = Input(UInt((muonParams.numWarps * Perf.counterWidth).W))
+      val perWarp_sync = Input(UInt((muonParams.numWarps * Perf.counterWidth).W))
+      val perWarp_memData = Input(UInt((muonParams.numWarps * Perf.counterWidth).W))
+      val perWarp_comData = Input(UInt((muonParams.numWarps * Perf.counterWidth).W))
+      val perWarp_struct = Input(UInt((muonParams.numWarps * Perf.counterWidth).W))
     })
 
     addResource("/vsrc/Profiler.v")
