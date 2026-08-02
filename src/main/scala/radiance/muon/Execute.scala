@@ -6,7 +6,7 @@ import org.chipsalliance.cde.config.Parameters
 import radiance.muon.backend.int._
 import radiance.muon.backend.fp._
 
-class Execute(implicit p: Parameters) extends CoreModule()(p) {
+class Execute(implicit p: Parameters) extends CoreModule()(p) with HasDebugContext {
   val io = IO(new Bundle {
     val req = Flipped(Decoupled(fuInT(hasRs1 = true, hasRs2 = true, hasRs3 = true)))
     val resp = Decoupled(writebackT())
@@ -19,8 +19,17 @@ class Execute(implicit p: Parameters) extends CoreModule()(p) {
     val flush = cacheFlushIO
     val softReset = Input(Bool())
     val beCSR = new Bundle {
+      val cyclesDispatched = Input(Perf.T)
       val cyclesEligible = Input(Perf.T)
       val cyclesIssued = Input(Perf.T)
+      val perWarp = Input(Vec(4, new Bundle {
+        val stallsWAW = Perf.T
+        val stallsWAR = Perf.T
+        val stallsScoreboard = Perf.T
+        val stallsRSFull = Perf.T
+        val stallsBusy = Perf.T
+        val stallsBusyLSU = Perf.T
+      }))
     }
     val perf = new Bundle {
       val instRetired = Output(Perf.T)
@@ -35,6 +44,7 @@ class Execute(implicit p: Parameters) extends CoreModule()(p) {
   val fpExPipe = Module(new FPExPipe(FPFormat.BF16))
   val mulDivPipe = Module(new MulDivPipe())
   val lsuPipe = Module(new LSUPipe())
+  connectDebug(lsuPipe)
   val sfuPipe = Module(new SFUPipe())
 
   val inst = io.req.bits.uop.inst
@@ -101,8 +111,10 @@ class Execute(implicit p: Parameters) extends CoreModule()(p) {
   sfuPipe.csrIO.perf.mcycle := mcycleReg
   sfuPipe.csrIO.perf.minstret := minstretReg
   sfuPipe.csrIO.perf.mcycleDecoded := io.feCSR.cyclesDecoded
+  sfuPipe.csrIO.perf.mcycleDispatched := io.beCSR.cyclesDispatched
   sfuPipe.csrIO.perf.mcycleEligible := io.beCSR.cyclesEligible
   sfuPipe.csrIO.perf.mcycleIssued := io.beCSR.cyclesIssued
+  sfuPipe.csrIO.perf.perWarp := io.beCSR.perWarp
   sfuPipe.csrIO.wmask := io.feCSR.wmask
 }
 

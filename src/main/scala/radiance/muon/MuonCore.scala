@@ -48,13 +48,17 @@ case class MuonCoreParams(
   csrAddrBits: Int = 32,
   // memory
   lsu: LoadStoreUnitParams = LoadStoreUnitParams(),
-  logGMEMInFlights: Int = 4, // per lane
-  logCoalGMEMInFlights: Int = 5, // all lanes
+  lsuUseModel: Boolean = false,  // use Cyclotron functional model for LSU
+  logGMEMInFlights: Int = 5,        // per lane
+  logCoalGMEMInFlights: Int = 5,    // all lanes
   logNonCoalGMEMInFlights: Int = 5, // all lanes
   // misc
   barrierBits: Int = 4,
-  debug: Boolean = false, // enable extra IOs for debug (ex: PC)
+  // dev
+  debug: Boolean = true,    // enable debug-only printfs and hardware constructs
+  debugLevel: Int = 2,      // max debug level to print
   trace: Boolean = false,   // enable instruction trace generation
+  profiler: Boolean = true, // enable performance profiling report generation
   difftest: Boolean = false // enable arch-state differential testing
                             // against cyclotron
 ) extends PhysicalCoreParams {
@@ -62,21 +66,20 @@ case class MuonCoreParams(
   val coreIdBits: Int = log2Ceil(numCores)
   val clusterIdBits: Int = log2Ceil(numClusters)
   val pRegBits = log2Up(numPhysRegs)
-  def l0dReqTagBits: Int = {
+  def l0dReqSourceBits: Int = {
     val coalVsNonCoal = 1
-    val sizeTagBits = 3 // store the size in the cache tag
-    val totalBits = (logCoalGMEMInFlights max logNonCoalGMEMInFlights) + coalVsNonCoal + sizeTagBits
+    (logCoalGMEMInFlights max logNonCoalGMEMInFlights) + coalVsNonCoal
+  }
+  def l0dReqTagBits(maxTransferBytes: Int): Int = {
+    require(isPow2(maxTransferBytes), s"maxTransferBytes must be a power of two, got $maxTransferBytes")
+    val sizeTagBits = log2Ceil(log2Ceil(maxTransferBytes) + 1) // store the size in the cache tag
+    val totalBits = l0dReqSourceBits + sizeTagBits
     println("l0d tag bits", totalBits)
     totalBits
   }
   def l0iReqTagBits: Int = {
     println("l0i tag bits", warpIdBits + log2Ceil(ibufDepth))
     log2Ceil(ibufDepth) + warpIdBits
-  }
-  def l1ReqTagBits: Int = {
-    val instVsData = 1
-    val coreBits = log2Ceil(numCores)
-    instVsData + coreBits + 5
   }
 }
 
@@ -256,10 +259,53 @@ trait HasCoreParameters {
     barrierBits = m.barrierBits,
     wantBits = m.warpIdBits + m.coreIdBits,
   ))
+}
 
-  def debugf(pable: Printable) = {
-    if (muonParams.debug) {
+class DebugContext(implicit val p: Parameters) extends ParameterizedBundle()(p) with HasCoreParameters {
+  val cycle = UInt(64.W)
+  val clusterId = UInt(muonParams.clusterIdBits.W)
+  val coreId = UInt(muonParams.coreIdBits.W)
+}
+
+trait HasDebugPrint extends HasCoreParameters {
+  protected def debugContext: Option[DebugContext] = None
+
+  private def printPrefix(ctx: DebugContext): Unit = {
+    // 64-bit gives too much whitespace
+    printf("[Muon c%d.%d @%d] ", ctx.clusterId, ctx.coreId, ctx.cycle(31, 0))
+  }
+
+  def debugf(level: Int, pable: Printable): Unit = {
+    if (muonParams.debug && level <= muonParams.debugLevel) {
+      debugContext match {
+        case Some(ctx) => printPrefix(ctx)
+        case None      => printf("[@?] ")
+      }
       printf(pable)
+    }
+  }
+
+  def debugf(pable: Printable): Unit = debugf(1, pable)
+
+  def debugfAppend(level: Int, pable: Printable): Unit = {
+    if (muonParams.debug && level <= muonParams.debugLevel) {
+      printf(pable)
+    }
+  }
+
+  def debugfAppend(pable: Printable): Unit = debugfAppend(1, pable)
+}
+
+trait HasDebugContext extends HasDebugPrint { this: Module =>
+  val debug = Option.when(muonParams.debug) {
+    IO(Input(new DebugContext))
+  }
+
+  override protected def debugContext: Option[DebugContext] = debug
+
+  protected def connectDebug(child: HasDebugContext): Unit = {
+    if (muonParams.debug) {
+      child.debug.get := debug.get
     }
   }
 }
@@ -348,7 +394,24 @@ class MuonCore(implicit p: Parameters) extends CoreModule {
   })
   dontTouch(io)
 
+  private val rootDebug = Option.when(muonParams.debug) {
+    val ctx = Wire(new DebugContext)
+    val cycle = RegInit(0.U(64.W))
+    cycle := cycle + 1.U
+    ctx.cycle := cycle
+    ctx.clusterId := io.clusterId
+    ctx.coreId := io.coreId
+    ctx
+  }
+
+  private def connectDebug(child: HasDebugContext) = {
+    if (muonParams.debug) {
+      child.debug.get := rootDebug.get
+    }
+  }
+
   val fe = Module(new Frontend)
+  connectDebug(fe)
   fe.idIO.clusterId := io.clusterId
   fe.idIO.coreId := io.coreId
   fe.io.imem <> io.imem
@@ -370,6 +433,7 @@ class MuonCore(implicit p: Parameters) extends CoreModule {
   be.io.icacheInFlight := fe.io.icacheInFlight
   io.perf.frontend <> fe.io.perf
   io.perf.backend <> be.io.perf
+  connectDebug(be)
 
   fe.io.lsuReserve <> be.io.lsuReserve
   fe.io.commit := be.io.schedWb

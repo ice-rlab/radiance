@@ -19,8 +19,9 @@ class ReservationStationEntry(implicit p: Parameters) extends CoreBundle()(p) {
   val busyMem = Vec(Isa.maxNumRegs, Bool())
 }
 
-class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
+class ReservationStation(implicit p: Parameters) extends CoreModule()(p) with HasDebugContext {
   val io = IO(new Bundle {
+    val softReset = Input(Bool())
     /** uop admitted to reservation station */
     val admit = Flipped(Decoupled(new ReservationStationEntry))
     /** instruction issued to the downstream EX pipe */
@@ -45,6 +46,16 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
       val memBlocked = Bool()
       val dataBlocked = Bool()
     }))
+    val perf = Output(new Bundle {
+      val cyclesDispatched = Perf.T
+      val cyclesEligible = Perf.T
+      val perWarp = Vec(numWarps, new Bundle {
+        val cyclesDispatched = Perf.T
+        val cyclesEligible = Perf.T
+        val stallsRSFull = Perf.T
+      })
+      val accRsOccupancy = Perf.T
+    })
   })
 
   val numEntries = muonParams.numIssueQueueEntries
@@ -54,7 +65,7 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
   // whether this table row is valid
   val validTable     = RegInit(VecInit.fill(numEntries)(false.B))
   // @perf: optimize; storing all of Decode fields in RS gets expensive
-  val instTable      = Mem(numEntries, ibufDeqIO)
+  val instTable      = RegInit(VecInit.fill(numEntries)(0.U.asTypeOf(ibufDeqIO)))
   // whether the instruction uses rs1/2/3
   // not actually a state; combinationally computed from instTable
   val hasOpTable     = Wire(Vec(numEntries, Vec(Isa.maxNumRegs, Bool())))
@@ -62,15 +73,15 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
   // not actually a state; combinationally computed from instTable
   val rsTable        = Wire(Vec(numEntries, Vec(Isa.maxNumRegs, pRegT)))
   // whether the valid operands are not busy & have been collected from regfile
-  val opReadyTable   = Mem(numEntries, Vec(Isa.maxNumRegs, Bool()))
+  val opReadyTable   = RegInit(VecInit.fill(numEntries)(VecInit.fill(Isa.maxNumRegs)(false.B)))
   // whether the operands are being written-to by in-flight insts in EX
-  val busyTable      = Mem(numEntries, Vec(Isa.maxNumRegs, Bool()))
+  val busyTable      = RegInit(VecInit.fill(numEntries)(VecInit.fill(Isa.maxNumRegs)(false.B)))
   // GCStack: whether each busy operand's outstanding producer is a memory op
   val busyMemTable   = Mem(numEntries, Vec(Isa.maxNumRegs, Bool()))
   // whether the operands are currently being collected
   // a partial set of hasOpTable; not all of the operands can be collected at
   // once
-  val collFiredTableMem = Mem(numEntries, Vec(Isa.maxNumRegs, Bool()))
+  val collFiredTableMem = RegInit(VecInit.fill(numEntries)(VecInit.fill(Isa.maxNumRegs)(false.B)))
   def collFiredTable(row: UInt): Vec[Bool] = {
     useCollector match {
       case true  => collFiredTableMem(row)
@@ -81,7 +92,7 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
   def collFiredTable(row: Int): Vec[Bool] = collFiredTable(row.U)
   // where the operand lives in the collector banks.  RS uses this to allocate a
   // spot in the collector & feed the correct data to EX upon issue.
-  val collPtrTable   = Mem(numEntries, UInt(numCollEntriesWidth.W))
+  val collPtrTable   = RegInit(VecInit.fill(numEntries)(0.U(numCollEntriesWidth.W)))
   // whether this entry has received the final `rseadResp` from collector this
   // cycle. Used when `forwardCollectorIssue` is enabled, to indicate whether
   // we need to use the forwarded opReady and collPtr data instead of the
@@ -102,6 +113,8 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
                               uop.inst.rs3))
   }
 
+  val rsDebugLevel = 1
+
   // ---------
   // admission
   // ---------
@@ -109,6 +122,12 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
   val rowEmptyVec = VecInit((0 until numEntries).map(!validTable(_)))
   val hasEmptyRow = rowEmptyVec.reduce(_ || _)
   io.admit.ready := hasEmptyRow
+  io.perf.perWarp.zipWithIndex.foreach { case (p, wid) =>
+    p.stallsRSFull :=
+    PerfCounter(io.softReset,
+      io.admit.valid && !hasEmptyRow &&
+      io.admit.bits.ibufEntry.uop.wid === wid.U)
+  }
 
   val emptyRow = PriorityEncoder(rowEmptyVec)
   when (io.admit.fire) {
@@ -121,7 +140,8 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
     collFiredTable(emptyRow) := VecInit.fill(Isa.maxNumRegs)(false.B)
     collPtrTable(emptyRow) := 0.U
 
-    debugf(cf"RS: admitted: warp=${io.admit.bits.ibufEntry.uop.wid}, " +
+    debugf(rsDebugLevel,
+           cf"RS: admitted: warp=${io.admit.bits.ibufEntry.uop.wid}, " +
            cf"PC=${io.admit.bits.ibufEntry.uop.pc}%x at row ${emptyRow}\n")
     printTable
   }
@@ -143,6 +163,25 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
 
   val rsOccupancy = WireDefault(PopCount(validTable))
   dontTouch(rsOccupancy)
+
+  val instsInRs = WireDefault(PopCount(validTable))
+  val accRsOccupancy = RegInit(0.U.asTypeOf(Perf.T))
+  when (io.softReset) {
+    accRsOccupancy := 0.U
+  }.otherwise {
+    accRsOccupancy := (accRsOccupancy + instsInRs)(Perf.counterWidth - 1, 0)
+  }
+  io.perf.accRsOccupancy := accRsOccupancy
+  dontTouch(instsInRs)
+
+  io.perf.cyclesDispatched := PerfCounter(io.softReset, instsInRs =/= 0.U)
+  io.perf.perWarp.zipWithIndex.foreach { case (p, wid) =>
+    val validThisWarp = (0 until numEntries).map { i =>
+      validTable(i) && (instTable(i).uop.wid === wid.U)
+    }
+    val hasThisWarp = validThisWarp.reduce(_ || _)
+    p.cyclesDispatched := PerfCounter(io.softReset, hasThisWarp)
+  }
 
   // -----------------
   // collector control
@@ -216,7 +255,8 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
     val newFired = (collFiredTable(collRow) zip io.collector.readReq.bits.regs.map(_.enable))
                    .map { case (a,b) => a || b }
     collFiredTable(collRow) := newFired
-    debugf(cf"RS: collector request fired at row:${collRow}, warp:${collUop.wid}, pc:${collUop.pc}%x\n")
+    debugf(rsDebugLevel,
+           cf"RS: collector request fired at row:${collRow}, warp:${collUop.wid}, pc:${collUop.pc}%x\n")
   }
 
   // upon collector response:
@@ -261,7 +301,8 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
           scbPort.incr := false.B
           scbPort.decr := (rs =/= 0.U)
 
-          debugf(cf"RS: collector response handled at row:${i}, " +
+          debugf(rsDebugLevel,
+                 cf"RS: collector response handled at row:${i}, " +
                  cf"warp:${instTable(i).uop.wid}, pc:${instTable(i).uop.pc}%x, " +
                  cf"collEntry:${io.collector.readResp.bits.collEntry}, " +
                  cf"rs:${rs}, rsi:${rsi}\n")
@@ -298,9 +339,9 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
     val newOpReadys = newOpReadyTable(i)
     val busys = busyTable(i)
     // using newOpReadys here considers ops that will-be-collected next cycle
-    // as issue-eligible, eliminating one cycle latency from coll req -> issue
+    // as issue-eligible, eliminating one cycle latency from coll done -> issue
     // sched. enabling this optimization also brings some area benefit, since
-    // reducing this latency allows shallower collector banks, which are
+    // reducing this latency allows for shallower collector banks, which are
     // generally large
     val allCollected = (if (muonParams.forwardCollectorIssue)
       newOpReadys else opReadys).reduce(_ && _)
@@ -338,7 +379,7 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
       collPtrTable(i)
     })
 
-    // deregister upon issue
+    // retire from RS upon issue
     when (candidate.fire) {
       validTable(i) := false.B
     }
@@ -370,6 +411,17 @@ class ReservationStation(implicit p: Parameters) extends CoreModule()(p) {
   //   // port.data input is not used
   // }
   dontTouch(issuedId)
+
+  // connect per-warp eligible perf counters
+  val hasEligible = eligibles.map(_.valid).reduce(_ || _)
+  io.perf.cyclesEligible := PerfCounter(io.softReset, hasEligible)
+  io.perf.perWarp.zipWithIndex.foreach { case (p, wid) =>
+    val eligiblesThisWarp = eligibles.map { row =>
+      row.valid && (row.bits.entry.uop.wid === wid.U)
+    }
+    val hasEligibleThisWarp = eligiblesThisWarp.reduce(_ || _)
+    p.cyclesEligible := PerfCounter(io.softReset, hasEligibleThisWarp)
+  }
 
   // if not using collector, RS only directly uses the readData port and never
   // sends readReq / gets readResp back, so we need to signal scoreboard

@@ -80,6 +80,7 @@ object L0iCacheHugeConfig extends DCacheParams(
 )
 
 object L0dCacheConfig extends DCacheParams(
+  // 4KiB
   nSets = 64,
   nWays = 1,
   rowBits = 64 * 8,
@@ -87,12 +88,31 @@ object L0dCacheConfig extends DCacheParams(
   nMSHRs = 4,
 )
 
+object L0dCacheHugeConfig extends DCacheParams(
+  // 64KiB
+  nSets = 512,
+  nWays = 1,
+  rowBits = 64 * 8,
+  blockBytes = 64,
+  nMSHRs = 32,
+)
+
 object L1CacheConfig extends DCacheParams(
+  // 64KiB
   nSets = 512,
   nWays = 4,
   rowBits = 32 * 8, // physical (sram) size
   blockBytes = 32, // logical size
   nMSHRs = 8, // maybe be able to decrease this
+)
+
+object L1CacheHugeConfig extends DCacheParams(
+  // 128KiB
+  nSets = 1024,
+  nWays = 4,
+  rowBits = 32 * 8, // physical (sram) size
+  blockBytes = 32, // logical size
+  nMSHRs = 32,
 )
 
 class WithRadianceControlBus extends Config ((site, here, up) => {
@@ -191,15 +211,6 @@ class RadianceMuonConfig extends Config(
   new RadianceBaseConfig
 )
 
-class RadianceCyclotronConfig extends Config(
-  new WithMuonCores(1, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), cyclotron = true) ++
-  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
-  new WithExtGPUMem() ++
-  new freechips.rocketchip.rocket.WithCFlushEnabled ++
-  new WithGPUResetAggregator(defaultReset = false) ++
-  new RadianceBaseConfig
-)
-
 class WithRadianceRocket extends Config(
   new freechips.rocketchip.rocket.WithCFlushEnabled ++
   new tacit.WithTraceSinkDMA(1) ++
@@ -209,9 +220,8 @@ class WithRadianceRocket extends Config(
   new freechips.rocketchip.rocket.WithNSmallCores(1)
 )
 
-class RadianceSingleClusterConfig extends Config(
-  new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
-  new WithMuonCores(2, location = InCluster(0), noILP = false, l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = true) ++
+class RadianceCyclotronCoreConfig extends Config(
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), cyclotronCore = true, trace = true) ++
   new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
   new WithExtGPUMem() ++
   new WithRadianceRocket ++
@@ -219,10 +229,195 @@ class RadianceSingleClusterConfig extends Config(
   new RadianceBaseConfig
 )
 
+class RadianceCyclotronMemConfig extends Config(
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), cyclotronMem = true, trace = true) ++
+  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
+  new WithExtGPUMem() ++
+  new WithRadianceRocket ++
+  new WithGPUResetAggregator(defaultReset = false) ++
+  new RadianceBaseConfig
+)
+
+class RadianceCyclotronLSUConfig extends Config(
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), cyclotronLSU = true, trace = true) ++
+  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
+  new WithExtGPUMem() ++
+  new WithRadianceRocket ++
+  new WithGPUResetAggregator(defaultReset = false) ++
+  new RadianceBaseConfig
+)
+
+class RadianceSingleClusterConfig extends Config(
+  new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = true) ++
+  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
+  new WithExtGPUMem() ++
+  new WithRadianceRocket ++
+  new WithGPUResetAggregator(defaultReset = false) ++
+  new RadianceBaseConfig
+)
+
+class RadianceSingleClusterSynConfig extends Config(
+  new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = false, profiler = false) ++
+  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
+  new WithExtGPUMem() ++
+  new WithRadianceRocket ++
+  new WithGPUResetAggregator(defaultReset = true) ++
+  new RadianceBaseConfig
+)
+
+class RadianceSingleClusterIssueDepthConfig(issueQueueEntries: Int) extends Config(
+  new WithMuonCores(
+    2,
+    location = InCluster(0),
+    l0i = Some(L0iCacheConfig),
+    l0d = Some(L0dCacheConfig),
+    trace = true,
+    profiler = true,
+    numIssueQueueEntries = issueQueueEntries,
+    lsqDepth = Some(32) // ensure LSU doesn't bottleneck RS entry
+  ) ++
+  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
+  new WithExtGPUMem() ++
+  new WithRadianceRocket ++
+  new WithGPUResetAggregator(defaultReset = false) ++
+  new RadianceBaseConfig
+)
+
+class RadianceSingleClusterIssueDepth1Config extends RadianceSingleClusterIssueDepthConfig(1)
+class RadianceSingleClusterIssueDepth2Config extends RadianceSingleClusterIssueDepthConfig(2)
+class RadianceSingleClusterIssueDepth4Config extends RadianceSingleClusterIssueDepthConfig(4)
+class RadianceSingleClusterIssueDepth8Config extends RadianceSingleClusterIssueDepthConfig(8)
+class RadianceSingleClusterIssueDepth16Config extends RadianceSingleClusterIssueDepthConfig(16)
+class RadianceSingleClusterIssueDepth32Config extends RadianceSingleClusterIssueDepthConfig(32)
+
+class RadianceSingleClusterLSQDepthConfig(lsqDepth: Int) extends Config(
+  new WithMuonCores(
+    2,
+    location = InCluster(0),
+    l0i = Some(L0iCacheConfig),
+    l0d = Some(L0dCacheConfig),
+    profiler = false,
+    lsqDepth = Some(lsqDepth)
+  ) ++
+  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
+  new WithExtGPUMem() ++
+  new WithRadianceRocket ++
+  new WithGPUResetAggregator(defaultReset = false) ++
+  new RadianceBaseConfig
+)
+
+class RadianceSingleClusterLSQDepth1Config extends RadianceSingleClusterLSQDepthConfig(1)
+class RadianceSingleClusterLSQDepth2Config extends RadianceSingleClusterLSQDepthConfig(2)
+class RadianceSingleClusterLSQDepth4Config extends RadianceSingleClusterLSQDepthConfig(4)
+class RadianceSingleClusterLSQDepth8Config extends RadianceSingleClusterLSQDepthConfig(8)
+class RadianceSingleClusterLSQDepth16Config extends RadianceSingleClusterLSQDepthConfig(16)
+class RadianceSingleClusterLSQDepth32Config extends RadianceSingleClusterLSQDepthConfig(32)
+
+object RadianceWarpLenConfig {
+  private val minL0dLineBytes = 64
+  private val wordBytes = 32 / 8
+  private def warpBytes(warpLen: Int): Int = warpLen * wordBytes
+  private def withBlockBytes(cache: DCacheParams, blockBytes: Int): DCacheParams =
+    cache.copy(rowBits = blockBytes * 8, blockBytes = blockBytes)
+
+  def l0i(warpLen: Int): DCacheParams =
+    L0iCacheConfig
+  def l0d(warpLen: Int): DCacheParams =
+    withBlockBytes(L0dCacheConfig, minL0dLineBytes max warpBytes(warpLen))
+  def l1(warpLen: Int): DCacheParams =
+    L1CacheConfig
+}
+
+class RadianceSingleClusterWarpLenConfig(warpLen: Int) extends Config(
+  new WithMuonCores(
+    2,
+    location = InCluster(0),
+    l0i = Some(RadianceWarpLenConfig.l0i(warpLen)),
+    l0d = Some(RadianceWarpLenConfig.l0d(warpLen)),
+    profiler = false,
+    numLanes = Some(warpLen)
+  ) ++
+  new WithSIMTConfig(numWarps = 8, numLanes = warpLen, numLsuLanes = warpLen, numSMEMInFlights = 8) ++
+  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = RadianceWarpLenConfig.l1(warpLen)) ++
+  new WithExtGPUMem() ++
+  new WithRadianceRocket ++
+  new WithGPUResetAggregator(defaultReset = false) ++
+  new RadianceBaseConfig
+)
+
+class RadianceSingleClusterWarpLen4Config extends RadianceSingleClusterWarpLenConfig(4)
+class RadianceSingleClusterWarpLen8Config extends RadianceSingleClusterWarpLenConfig(8)
+class RadianceSingleClusterWarpLen16Config extends RadianceSingleClusterWarpLenConfig(16)
+class RadianceSingleClusterWarpLen32Config extends RadianceSingleClusterWarpLenConfig(32)
+class RadianceSingleClusterWarpLen64Config extends RadianceSingleClusterWarpLenConfig(64)
+
+class RadianceSingleClusterWarpDepthConfig(warpDepth: Int) extends Config(
+  new WithMuonCores(
+    2,
+    location = InCluster(0),
+    l0i = Some(L0iCacheConfig),
+    l0d = Some(L0dCacheConfig),
+    trace = false,
+    profiler = false,
+    cyclotronCore = false,
+    difftest = false,
+    numWarps = Some(warpDepth)
+  ) ++
+  new WithSIMTConfig(numWarps = warpDepth, numLanes = 16, numLsuLanes = 16, numSMEMInFlights = 8) ++
+  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
+  new WithExtGPUMem() ++
+  new WithRadianceRocket ++
+  new WithGPUResetAggregator(defaultReset = false) ++
+  new RadianceBaseConfig
+)
+
+class RadianceSingleClusterWarpDepth2Config extends RadianceSingleClusterWarpDepthConfig(2)
+class RadianceSingleClusterWarpDepth4Config extends RadianceSingleClusterWarpDepthConfig(4)
+class RadianceSingleClusterWarpDepth8Config extends RadianceSingleClusterWarpDepthConfig(8)
+class RadianceSingleClusterWarpDepth16Config extends RadianceSingleClusterWarpDepthConfig(16)
+class RadianceSingleClusterWarpDepth32Config extends RadianceSingleClusterWarpDepthConfig(32)
+
+class RadianceSingleClusterPhysRegConfig(numPhysRegs: Int) extends Config(
+  new WithMuonCores(
+    2,
+    location = InCluster(0),
+    l0i = Some(L0iCacheConfig),
+    l0d = Some(L0dCacheConfig),
+    trace = true,
+    profiler = true,
+    cyclotronCore = false,
+    difftest = false,
+    numPhysRegs = Some(numPhysRegs)
+  ) ++
+  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
+  new WithExtGPUMem() ++
+  new WithRadianceRocket ++
+  new WithGPUResetAggregator(defaultReset = false) ++
+  new RadianceBaseConfig
+)
+
+class RadianceSingleClusterPhysReg64Config extends RadianceSingleClusterPhysRegConfig(64)
+class RadianceSingleClusterPhysReg128Config extends RadianceSingleClusterPhysRegConfig(128)
+class RadianceSingleClusterPhysReg256Config extends RadianceSingleClusterPhysRegConfig(256)
+class RadianceSingleClusterPhysReg512Config extends RadianceSingleClusterPhysRegConfig(512)
+class RadianceSingleClusterPhysReg1024Config extends RadianceSingleClusterPhysRegConfig(1024)
+
 class RadianceSingleClusterLargeICacheConfig extends Config(
   new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
-  new WithMuonCores(2, location = InCluster(0), noILP = false, l0i = Some(L0iCacheHugeConfig), l0d = Some(L0dCacheConfig), trace = true) ++
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheHugeConfig), l0d = Some(L0dCacheConfig), trace = true) ++
   new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
+  new WithExtGPUMem() ++
+  new WithRadianceRocket ++
+  new WithGPUResetAggregator(defaultReset = false) ++
+  new RadianceBaseConfig
+)
+
+class RadianceSingleClusterLargeDCacheConfig extends Config(
+  new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheHugeConfig), trace = true) ++
+  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheHugeConfig) ++
   new WithExtGPUMem() ++
   new WithRadianceRocket ++
   new WithGPUResetAggregator(defaultReset = false) ++
@@ -231,7 +426,7 @@ class RadianceSingleClusterLargeICacheConfig extends Config(
 
 class RadianceSingleClusterDiffTestConfig extends Config(
   new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
-  new WithMuonCores(2, location = InCluster(0), noILP = false, l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = true, difftest = true) ++
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = true, difftest = true) ++
   new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
   new WithExtGPUMem() ++
   new WithRadianceRocket ++
@@ -241,7 +436,7 @@ class RadianceSingleClusterDiffTestConfig extends Config(
 
 class RadianceSingleClusterHostLaunchConfig extends Config(
   new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
-  new WithMuonCores(2, location = InCluster(0), noILP = false, l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = true) ++
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = true) ++
   new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
   new WithExtGPUMem() ++
   new WithRadianceRocket ++
@@ -250,10 +445,10 @@ class RadianceSingleClusterHostLaunchConfig extends Config(
 )
 
 class RadianceLeanTapeoutSimConfig extends Config(
-  new WithMuonCores(2, location = InCluster(1), noILP = false, l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig)) ++
+  new WithMuonCores(2, location = InCluster(1), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig)) ++
   new WithRadianceCluster(1, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
   new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
-  new WithMuonCores(2, location = InCluster(0), noILP = false, l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig)) ++
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig)) ++
   new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
   new WithExtGPUMem() ++
   new WithRadianceRocket ++
@@ -263,10 +458,10 @@ class RadianceLeanTapeoutSimConfig extends Config(
 
 class RadianceTapeoutSimTraceConfig extends Config(
   new WithRadianceMxGemmini(location = InCluster(1), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
-  new WithMuonCores(2, location = InCluster(1), noILP = false, l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = true) ++
+  new WithMuonCores(2, location = InCluster(1), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = true) ++
   new WithRadianceCluster(1, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
   new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
-  new WithMuonCores(2, location = InCluster(0), noILP = false, l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = true) ++
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = true) ++
   new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
   new WithExtGPUMem() ++
   new WithRadianceRocket ++
@@ -281,15 +476,22 @@ class RadianceTapeoutSimTraceHostLaunchConfig extends Config(
 
 class RadianceTapeoutSimConfig extends Config(
   new WithRadianceMxGemmini(location = InCluster(1), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
-  new WithMuonCores(2, location = InCluster(1), noILP = false, l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig)) ++
+  new WithMuonCores(2, location = InCluster(1), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig)) ++
   new WithRadianceCluster(1, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
   new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
-  new WithMuonCores(2, location = InCluster(0), noILP = false, l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig)) ++
+  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig)) ++
   new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
   new WithExtGPUMem() ++
   new WithRadianceRocket ++
   new WithGPUResetAggregator(defaultReset = false) ++
   new RadianceBaseConfig
+)
+
+class RadianceTapeoutNDAFreeConfig extends Config(
+  new chipyard.clocking.WithClockTapIOCells ++
+  new WithRadianceTapeoutPeripheralsNoClockGate ++
+  new WithGPUResetAggregator(defaultReset = true) ++
+  new RadianceTapeoutSimTraceConfig
 )
 
 class RadianceGemminiOnlyConfig extends Config(

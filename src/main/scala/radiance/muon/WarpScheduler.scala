@@ -15,7 +15,7 @@ class SchedWriteback(implicit p: Parameters) extends CoreBundle()(p) {
 }
 
 class WarpScheduler(implicit p: Parameters)
-  extends CoreModule {
+  extends CoreModule with HasDebugContext {
 
   val cmdProcOpt = None
 
@@ -338,7 +338,7 @@ class WarpScheduler(implicit p: Parameters)
 
   when (io.rename.fire) {
     val e = io.rename.bits
-    printf(cf"[DISPATCH]  wid=${e.wid} pc=${e.pc}%x tmask=${e.tmask}%b\n")
+    debugf(cf"[DISPATCH]  wid=${e.wid} pc=${e.pc}%x tmask=${e.tmask}%b\n")
   }
 }
 
@@ -359,10 +359,8 @@ class StallTracker(outer: WarpScheduler)(implicit m: MuonCoreParams) {
 
   def stall(wid: UInt, pc: UInt) = {
     when(stalls(wid).stallReason(HAZARD)) {
-      printf(cf"============WARNING============\n")
-      printf(cf"stalling stalled warp id $wid for pc=$pc%x\n")
-      printf(cf"this is most likely due to wspawn being called")
-      printf(cf"by multiple warps\n")
+      outer.debugf(cf"WARNING: stalling stalled warp id ${wid} for pc=${pc}%x; " +
+        cf"this is most likely due to wspawn being called by multiple warps\n")
     }
     stalls(wid).pc := pc
     stalls(wid).stallReason(HAZARD) := true.B
@@ -395,19 +393,25 @@ object Predecoder {
 }
 
 class IPDOMStack(outer: WarpScheduler)(implicit m: MuonCoreParams) {
-  // val ipdomStackMem = Seq.fill(m.numWarps)(SRAM(m.numIPDOMEntries, outer.ipdomStackEntryT, 0, 0, 1))
   val ipdomStackMem = Seq.fill(m.numWarps) {
-    Mem(m.numIPDOMEntries, outer.ipdomStackEntryT)
+    RegInit(VecInit.fill(m.numIPDOMEntries){
+      val r = Wire(outer.ipdomStackEntryT)
+      r.divergent := false.B
+      r.restoredMask := 0.U(m.numLanes.W)
+      r.elseMask := 0.U(m.numLanes.W)
+      r.elsePC := 0.U(m.archLen.W)
+      r
+    })
   }
   val readAddr = WireInit(VecInit.fill(m.numWarps)( 0.U(log2Ceil(m.numIPDOMEntries).W)))
   val readData = VecInit((ipdomStackMem zip readAddr).map { case (mem, addr) =>
-    RegNext(mem.read(addr))
+    RegNext(mem(addr))
   })
   val writeEnable = WireInit(VecInit.fill(m.numWarps)(false.B))
   val writeAddr = WireInit(0.U.asTypeOf(readAddr.cloneType))
   val writeData = Wire(Vec(m.numWarps, outer.ipdomStackEntryT))
   (ipdomStackMem lazyZip writeEnable lazyZip writeAddr lazyZip writeData).foreach { case (m, en, a, d) =>
-    when (en) { m.write(a, d) }
+    when (en) { m(a) := d }
   }
 
   val branchTaken = RegInit(VecInit.fill(m.numWarps)(VecInit.fill(m.numIPDOMEntries)(false.B)))

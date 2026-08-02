@@ -26,7 +26,8 @@ case class MuonTileParams(
   icacheUsingD: Option[DCacheParams] = None,
   dcache: Option[DCacheParams] = None,
   peripheralAddr: BigInt = 0,
-  cyclotron: Boolean = false,
+  cyclotronCore: Boolean = false,
+  cyclotronMem: Boolean = false,
   disabled: Boolean = false,
   btb: Option[BTBParams] = None,
   beuAddr: Option[BigInt] = None,
@@ -35,6 +36,31 @@ case class MuonTileParams(
   boundaryBuffers: Option[RocketTileBoundaryBufferParams] = None,
   l1CacheLineBytes: Int = 32,
 ) extends InstantiableTileParams[MuonTile] {
+  private def nbdCacheSourceIds(cache: DCacheParams): Int =
+    (1 max cache.nMSHRs) + cache.nMMIOs
+
+  private def xbarRangeSize(sourceIds: Int): Int =
+    if (sourceIds == 0) 0 else 1 << log2Ceil(sourceIds)
+
+  def l1ReqTagBits: Int = {
+    val coalescedReqWidth = dcache.map(_.blockBytes).getOrElse(core.numLanes * core.archLen / 8)
+    require(coalescedReqWidth >= l1CacheLineBytes)
+    require(coalescedReqWidth % l1CacheLineBytes == 0)
+    require(isPow2(coalescedReqWidth / l1CacheLineBytes))
+
+    val fragmenterAddedBits =
+      if (coalescedReqWidth == l1CacheLineBytes) 0
+      else log2Ceil(coalescedReqWidth / l1CacheLineBytes) + 1
+
+    require(icacheUsingD.isDefined)
+    val l0iSrcIds = nbdCacheSourceIds(icacheUsingD.get)
+    val l0dSrcIds = dcache
+      .map(c => nbdCacheSourceIds(c) << fragmenterAddedBits)
+      .getOrElse(1 << core.l0dReqTagBits(coalescedReqWidth))
+
+    log2Ceil(core.numCores * (xbarRangeSize(l0iSrcIds) + xbarRangeSize(l0dSrcIds)))
+  }
+
   def instantiate(
     crossing: HierarchicalElementCrossingParamsLike,
     lookup: LookupByHartIdImpl
@@ -127,6 +153,9 @@ class MuonTile(
   val lsuDerived = new LoadStoreUnitDerivedParams(q, muonParams.core)
   val lsuSourceIdBits = lsuDerived.sourceIdBits
 
+  private def cacheMissSourceIds(cache: DCacheParams): Int =
+    (1 max cache.nMSHRs) + cache.nMMIOs
+
   // ===========
   // smem
   // ===========
@@ -187,21 +216,39 @@ class MuonTile(
     )))
   }
 
-  val (l0iOut, l0iIn, l0iFlushRegNode) = muonParams.icacheUsingD.map { l0iParams =>
-    val l0i = LazyModule(new TLULNBDCache(TLNBDCacheParams(
-      id = tileId,
-      cache = l0iParams,
-      cacheTagBits = muonParams.core.l0iReqTagBits,
-      overrideDChannelSize = Some(3),
-      flushAddr = Some(muonParams.peripheralAddr),
-    )))
-    l0i.flushNode.get := iFlushMaster
-    (connectBuf(l0i.outNode, 4), l0i.inNode, l0i.flushRegNode)
-  }.getOrElse {
-    CacheFlushNode.Slave() := iFlushMaster // TODO: might have to tie off
-    val passthru = TLEphemeralNode()
-    (passthru, passthru, None)
-  }
+  val (l0iOut, l0iIn, l0iFlushRegNode): (TLNode, TLNode, Option[TLRegisterNode]) =
+    if (muonParams.cyclotronMem) {
+      val l0i = LazyModule(new CyclotronTLInstMem(CyclotronTLInstMemParams(
+        name = s"muon_${muonParams.clusterId}_${muonParams.coreId}_cyclotron_l0i",
+        flushAddr = Some(muonParams.peripheralAddr),
+      )))
+      l0i.flushNode.get := iFlushMaster
+
+      val quietSourceBits = muonParams.icacheUsingD
+        .map(cache => log2Ceil(cacheMissSourceIds(cache)))
+        .getOrElse(0)
+      val quietOut = idleMaster(
+        sourceBits = quietSourceBits,
+        name = s"muon_${muonParams.clusterId}_${muonParams.coreId}_quiet_l0i"
+      )
+      (quietOut, l0i.inNode, l0i.flushRegNode)
+    } else {
+      muonParams.icacheUsingD.map { l0iParams =>
+        val l0i = LazyModule(new TLULNBDCache(TLNBDCacheParams(
+          id = tileId,
+          cache = l0iParams,
+          cacheTagBits = muonParams.core.l0iReqTagBits,
+          overrideDChannelSize = Some(3),
+          flushAddr = Some(muonParams.peripheralAddr),
+        )))
+        l0i.flushNode.get := iFlushMaster
+        (connectBuf(l0i.outNode, 4), l0i.inNode, l0i.flushRegNode)
+      }.getOrElse {
+        CacheFlushNode.Slave() := iFlushMaster // TODO: might have to tie off
+        val passthru = TLEphemeralNode()
+        (passthru, passthru, None)
+      }
+    }
   val icacheNode = TLIdentityNode()
   icacheNode := l0iOut
   l0iIn :=
@@ -216,8 +263,9 @@ class MuonTile(
 
   val dFlushMaster = CacheFlushNode.Master()
   
-  // LSU expects all-lanes-at-once requests, so request valid is dependent on whether all lanes are ready
-  // This interacts poorly with downstream request arbitration (e.g. XBar), so we need buffer to decouple
+  // LSU expects all-lanes-at-once requests, so request valid is dependent on
+  // whether all lanes are ready.  This interacts poorly with downstream request
+  // arbitration (e.g. XBar), so we need a TLbuffer to decouple
   val innerLsuNodes = Seq.tabulate(muonParams.core.numLanes) { lid =>
     TLClientNode(Seq(TLMasterPortParameters.v2(
       Seq(TLMasterParameters.v1(
@@ -234,62 +282,100 @@ class MuonTile(
   })
 
   
-  val coalescedReqWidth = muonParams.core.numLanes * muonParams.core.archLen / 8
+  val warpBytes = muonParams.core.numLanes * muonParams.core.archLen / 8
+  val coalescedReqWidth = muonParams.dcache.map(_.blockBytes).getOrElse(warpBytes)
 
-  val (l0dOut, l0dIn, l0dFlushRegNode) = muonParams.dcache.map { l0dParams =>
-    require(muonParams.dcache.map(_.blockBytes).getOrElse(coalescedReqWidth) == coalescedReqWidth)
-    println(f"l0d flush address is ${muonParams.peripheralAddr}%x")
-    val l0d = LazyModule(new TLULNBDCache(TLNBDCacheParams(
-      id = tileId,
-      cache = l0dParams,
-      cacheTagBits = muonParams.core.l0dReqTagBits,
+  // visibility node that cluster-level l1 sees coming out of tile-local l0d.
+  // icacheNode is also exposed with dcacheNode
+  val dcacheNode = visibilityNode
+
+  val l0dFlushRegNode: Option[TLRegisterNode] = if (muonParams.cyclotronMem) {
+    // When using cyclotron mem, we replace both coalescer+L0D with the cyclotron
+    // mem.  This is because the Cyclotron memory has per-lane DataMemIO
+    // interface, and supports full throughput regardless of coalesce-ability
+
+    val l0d = LazyModule(new CyclotronTLDataMem(CyclotronTLDataMemParams(
+      name = s"muon_${muonParams.clusterId}_${muonParams.coreId}_cyclotron_l0d",
       flushAddr = Some(muonParams.peripheralAddr + 0x100),
     )))
     l0d.flushNode.get := dFlushMaster
-    (l0d.outNode, l0d.inNode, l0d.flushRegNode)
-  }.getOrElse {
-    CacheFlushNode.Slave() := dFlushMaster // TODO: tie off
-    val passthru = TLEphemeralNode()
-    (passthru, passthru, None)
+    require(l0d.inNodes.length == lsuNodes.length,
+      s"CyclotronTLDataMem lanes (${l0d.inNodes.length}) must match LSU nodes (${lsuNodes.length})")
+    (l0d.inNodes zip lsuNodes).foreach { case (memNode, lsuNode) =>
+      memNode := lsuNode
+    }
+
+    // re-play l0->l1 source bit transforms done elsewhere in the fabric so
+    // that we set correct source bits for l0's l1-facing downstream node.
+    // FIXME; brittle
+    val fragmenterAddedBits =
+      if (coalescedReqWidth == muonParams.l1CacheLineBytes) 0
+      else log2Ceil(coalescedReqWidth / muonParams.l1CacheLineBytes) + 1
+    val quietSourceBits = muonParams.dcache
+      .map(cache => log2Ceil(cacheMissSourceIds(cache) << fragmenterAddedBits))
+      .getOrElse(muonParams.core.l0dReqTagBits(coalescedReqWidth))
+    //
+    dcacheNode := idleMaster(
+      sourceBits = quietSourceBits,
+      name = s"muon_${muonParams.clusterId}_${muonParams.coreId}_quiet_l0d"
+    )
+    l0d.flushRegNode
+  } else {
+    val (l0dOut, l0dIn, l0dFlushRegNode) = muonParams.dcache.map { l0dParams =>
+      require(l0dParams.blockBytes == coalescedReqWidth)
+      require(l0dParams.blockBytes >= warpBytes)
+      println(f"l0d flush address is ${muonParams.peripheralAddr}%x")
+      val l0d = LazyModule(new TLULNBDCache(TLNBDCacheParams(
+        id = tileId,
+        cache = l0dParams,
+        cacheTagBits = muonParams.core.l0dReqTagBits(coalescedReqWidth),
+        flushAddr = Some(muonParams.peripheralAddr + 0x100),
+      )))
+      l0d.flushNode.get := dFlushMaster
+      (l0d.outNode, l0d.inNode, l0d.flushRegNode)
+    }.getOrElse {
+      CacheFlushNode.Slave() := dFlushMaster // TODO: tie off
+      val passthru = TLEphemeralNode()
+      (passthru, passthru, None)
+    }
+
+    // ===========
+    // coalescer
+    // ===========
+
+    val coalescer = LazyModule(new CoalescingUnit(CoalescerConfig(
+      enable = true,
+      numLanes = muonParams.core.numLanes,
+      addressWidth = muonParams.core.archLen,
+      dataBusWidth = log2Ceil(coalescedReqWidth),
+      coalLogSize = log2Ceil(coalescedReqWidth),
+      wordSizeInBytes = muonParams.core.archLen / 8,
+      numOldSrcIds = 1 << lsuSourceIdBits,
+      numNewSrcIds = 1 << muonParams.core.logCoalGMEMInFlights,
+      respQueueDepth = 2,
+      numCoalReqs = 1,
+    )))
+
+    dcacheNode :=
+      ResponseFIFOFixer() :=
+      TLFragmenter(muonParams.l1CacheLineBytes, coalescedReqWidth, alwaysMin = true) :=
+      TLWidthWidget(coalescedReqWidth) :=
+      l0dOut
+    val coalXbar = LazyModule(new TLXbar).suggestName("coal_out_agg_xbar").node
+    val nonCoalXbar = LazyModule(new TLXbar).suggestName("coal_out_nc_xbar").node
+    l0dIn := coalXbar
+
+    // (0 until muonParams.core.numLanes).foreach(_ => nonCoalXbar := coalescer.nexusNode)
+    coalXbar := coalescer.nexusNode
+    coalescer.passthroughNodes.foreach(nonCoalXbar := _)
+    (coalXbar
+      := TLWidthWidget(muonParams.core.archLen / 8)
+      := TLSourceShrinker(1 << muonParams.core.logNonCoalGMEMInFlights)
+      := nonCoalXbar)
+
+    lsuNodes.foreach(coalescer.nexusNode := _)
+    l0dFlushRegNode
   }
-
-  val dcacheNode = visibilityNode
-
-  // ===========
-  // coalescer
-  // ===========
-
-  val coalescer = LazyModule(new CoalescingUnit(CoalescerConfig(
-    enable = true,
-    numLanes = muonParams.core.numLanes,
-    addressWidth = muonParams.core.archLen,
-    dataBusWidth = log2Ceil(coalescedReqWidth),
-    coalLogSize = log2Ceil(coalescedReqWidth),
-    wordSizeInBytes = muonParams.core.archLen / 8,
-    numOldSrcIds = 1 << lsuSourceIdBits,
-    numNewSrcIds = 1 << muonParams.core.logCoalGMEMInFlights,
-    respQueueDepth = 4,
-    numCoalReqs = 1,
-  )))
-
-  dcacheNode :=
-    ResponseFIFOFixer() :=
-    TLFragmenter(muonParams.l1CacheLineBytes, coalescedReqWidth, alwaysMin = true) :=
-    TLWidthWidget(coalescedReqWidth) :=
-    l0dOut
-  val coalXbar = LazyModule(new TLXbar).suggestName("coal_out_agg_xbar").node
-  val nonCoalXbar = LazyModule(new TLXbar).suggestName("coal_out_nc_xbar").node
-  l0dIn := coalXbar
-
-  // (0 until muonParams.core.numLanes).foreach(_ => nonCoalXbar := coalescer.nexusNode)
-  coalXbar := coalescer.nexusNode
-  coalescer.passthroughNodes.foreach(nonCoalXbar := _)
-  (coalXbar
-    := TLWidthWidget(muonParams.core.archLen / 8)
-    := TLSourceShrinker(1 << muonParams.core.logNonCoalGMEMInFlights)
-    := nonCoalXbar)
-
-  lsuNodes.foreach(coalescer.nexusNode := _)
 
   // ===========
   // misc
@@ -327,7 +413,7 @@ class MuonTile(
     Resource(cpuDevice, "reg").bind(ResourceAddress(tileId))
   }
 
-  override lazy val module = if (muonParams.cyclotron) {
+  override lazy val module = if (muonParams.cyclotronCore) {
     new CyclotronTileModuleImp(this)
   } else {
     new MuonTileModuleImp(this)
@@ -392,8 +478,7 @@ class MuonTileModuleImp(outer: MuonTile) extends BaseTileModuleImp(outer) {
   }
 
   // performance counters
-  val isSim = p(RadianceSimArgs)
-  if (isSim) {
+  if (core.muonParams.profiler) {
     val cperf = Module(new Profiler(
       clusterId = outer.muonParams.clusterId,
       coreId = outer.muonParams.coreId,
@@ -404,7 +489,6 @@ class MuonTileModuleImp(outer: MuonTile) extends BaseTileModuleImp(outer) {
 
   // RTL-model difftest
   if (core.muonParams.difftest) {
-    assert(isSim, "muon traces cannot enabled in non-sim mode!")
     val cdiff = Module(new CyclotronDiffTest(
       clusterId = outer.muonParams.clusterId,
       coreId = outer.muonParams.coreId,

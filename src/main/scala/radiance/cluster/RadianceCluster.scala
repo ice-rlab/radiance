@@ -137,7 +137,7 @@ class RadianceCluster (
   val l1cache = LazyModule(new TLNBDCache(TLNBDCacheParams(
     id = clusterId,
     cache = thisClusterParams.l1Config,
-    cacheTagBits = muonTiles.head.muonParams.core.l1ReqTagBits,
+    cacheTagBits = muonTiles.head.muonParams.l1ReqTagBits,
     overrideDChannelSize = Some(log2Ceil(thisClusterParams.l1Config.blockBytes)),
     makeLandingPads = true
   ))(
@@ -161,7 +161,8 @@ class RadianceCluster (
       .foreach(_ := HackAtomicNode(8) := clcbus.outwardNode)
   }
 
-//  val l1InNodes = muonTiles.map(_.dcacheNode)
+  // here we serialize icache and dcache traffic.  need to be careful of
+  // deadlocks
   val l1InNodes = muonTiles.flatMap(t => Seq(t.icacheNode, t.dcacheNode))
   val l1InXbar = LazyModule(new TLXbar()).suggestName("radiance_l1_in_xbar").node
   l1cache.inNode := TLFIFOFixer() := l1InXbar
