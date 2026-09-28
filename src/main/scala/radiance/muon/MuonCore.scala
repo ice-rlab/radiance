@@ -21,7 +21,7 @@ case class MuonCoreParams(
   numWarps: Int = 8,
   numLanes: Int = 16,
   // schedule, dispatch, rename
-  numPhysRegs: Int = 256,
+  numPhysRegs: Int = 1024,
   numArchRegs: Int = 128,
   logRenameMinWarps: Int = 1, // minimum 2 warps share PRF
   numIPDOMEntries: Int = 8,

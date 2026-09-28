@@ -352,7 +352,10 @@ class MuonTile(
       wordSizeInBytes = muonParams.core.archLen / 8,
       numOldSrcIds = 1 << lsuSourceIdBits,
       numNewSrcIds = 1 << muonParams.core.logCoalGMEMInFlights,
-      respQueueDepth = 2,
+      // respQueueDepth = 2,
+      // Bumped to 8: OnePortLanePositionedQueue (see Coalescing.scala respQueues) requires
+      // rows >= 8 && rows % 4 == 0.
+      respQueueDepth = 8,
       numCoalReqs = 1,
     )))
 

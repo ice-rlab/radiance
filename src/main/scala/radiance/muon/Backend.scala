@@ -4,6 +4,7 @@ import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import radiance.muon.backend.int.LsuOpDecoder
+import midas.targetutils.PerfCounter
 
 class Backend(implicit p: Parameters) extends CoreModule()(p) with HasDebugContext {
   val io = IO(new Bundle {
@@ -74,7 +75,7 @@ class Backend(implicit p: Parameters) extends CoreModule()(p) with HasDebugConte
   }
   // wmask bit is pcTracker(wid).valid, forwarded from WarpScheduler via the CSR path
   (io.perf.perWarp zip io.feCSR.wmask.asBools).foreach { case (p, occupied) =>
-    p.unoccupied := PerfCounter(!occupied)
+    p.unoccupied := PerfCounter(io.softReset, !occupied)
   }
   io.perf.perWarp.zipWithIndex.foreach { case (p, wid) =>
     p.stallsRSFull := reservStation.io.perf.perWarp(wid).stallsRSFull
@@ -201,14 +202,26 @@ class Backend(implicit p: Parameters) extends CoreModule()(p) with HasDebugConte
     .elsewhen (dataBlocked)                   { bucket := 7.U }
     .elsewhen (structBlocked)                 { bucket := 8.U }
 
-    p.control := PerfCounter(bucket === 2.U)
-    p.sync    := PerfCounter(bucket === 3.U)
-    p.ifetch  := PerfCounter(bucket === 4.U)
-    p.idle    := PerfCounter(bucket === 5.U)
-    p.memData := PerfCounter(bucket === 6.U)
-    p.comData := PerfCounter(bucket === 7.U)
-    p.struct  := PerfCounter(bucket === 8.U)
+    midas.targetutils.PerfCounter(bucket === 0.U, s"warp${wid}_unoccupied", s"warp $wid: slot unoccupied")
+    midas.targetutils.PerfCounter(bucket === 1.U, s"warp${wid}_base",       s"warp $wid: issued this cycle")
+    midas.targetutils.PerfCounter(bucket === 2.U, s"warp${wid}_control",    s"warp $wid: stalled on control/discard")
+    midas.targetutils.PerfCounter(bucket === 3.U, s"warp${wid}_sync",       s"warp $wid: stalled on barrier")
+    midas.targetutils.PerfCounter(bucket === 4.U, s"warp${wid}_ifetch",     s"warp $wid: stalled on icache miss")
+    midas.targetutils.PerfCounter(bucket === 5.U, s"warp${wid}_idle",       s"warp $wid: stalled, ibuf empty")
+    midas.targetutils.PerfCounter(bucket === 6.U, s"warp${wid}_memData",    s"warp $wid: stalled on memory producer")
+    midas.targetutils.PerfCounter(bucket === 7.U, s"warp${wid}_comData",    s"warp $wid: stalled on compute producer")
+    midas.targetutils.PerfCounter(bucket === 8.U, s"warp${wid}_struct",     s"warp $wid: stalled on structural hazard")
+
+
+    p.control := PerfCounter(io.softReset, bucket === 2.U)
+    p.sync    := PerfCounter(io.softReset, bucket === 3.U)
+    p.ifetch  := PerfCounter(io.softReset, bucket === 4.U)
+    p.idle    := PerfCounter(io.softReset, bucket === 5.U)
+    p.memData := PerfCounter(io.softReset, bucket === 6.U)
+    p.comData := PerfCounter(io.softReset, bucket === 7.U)
+    p.struct  := PerfCounter(io.softReset, bucket === 8.U)
   }
+
 
   if (noILP) {
     // fallback issue: stall every instruction until writeback

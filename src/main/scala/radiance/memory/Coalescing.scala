@@ -7,7 +7,8 @@ import chisel3.util._
 import freechips.rocketchip.diplomacy.{AddressRange, AddressSet, IdRange}
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.unittest._
-import freechips.rocketchip.util.{BundleField, MultiPortQueue}
+// import freechips.rocketchip.util.{BundleField, MultiPortQueue}
+import freechips.rocketchip.util.{BundleField, IdentityCode, MultiPortQueue, OnePortLanePositionedQueue}
 import org.chipsalliance.cde.config.{Field, Parameters}
 import org.chipsalliance.diplomacy.lazymodule.{LazyModule, LazyModuleImp}
 import radiance.subsystem.SIMTCoreKey
@@ -500,7 +501,13 @@ class CoalescingUnitImp(outer: CoalescingUnit, config: CoalescerConfig)
   )
   
   val respQueues = Seq.tabulate(config.numLanes) { _ =>
-    Module(new MultiPortQueue(respQueueEntryT, 2, 1, 2, config.respQueueDepth, flow = false))
+    // Module(new MultiPortQueue(respQueueEntryT, 2, 1, 2, config.respQueueDepth, flow = false))
+    // Default MultiPortQueue storage (FloppedLanePositionedQueue) uses a combinational-read
+    // Mem() with masked writes, which Vivado can't map to a legal dual-port BRAM template
+    // (Synth 8-2913) and dissolves into registers instead, destabilizing synthesis.
+    // OnePortLanePositionedQueue uses SyncReadMem and synthesizes cleanly.
+    Module(new MultiPortQueue(respQueueEntryT, 2, 1, 2, config.respQueueDepth, flow = false,
+      storage = OnePortLanePositionedQueue(new IdentityCode)))
   }
 
   // INPUT: Responses from nexusNode outputs (non-coalesced, lanes 0 to n-1)

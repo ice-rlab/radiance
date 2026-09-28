@@ -391,6 +391,15 @@ class WithRadianceMxGemmini(location: HierarchicalLocation, crossing: RocketCros
         // spatialArrayOutputType = MxFloat(8, 8, 1),
         // meshProdPrecisionList = Seq.fill(16)(8, 8),
         // meshAccPrecisionList = Seq.fill(16)(MxFloat(8, 8, 1)),
+        // Per-mesh-row precision schedules sized to this Gemmini's dim. The defaults have 16
+        // entries (written for a 16-row mesh) and Mesh.scala indexes them by row, so at dim 8
+        // every row -- including the output row -- was MxFloat(4, 5, 4) and the full-range
+        // MxFloat(8, 8, 4) entry was never used. takeRight(dim) keeps the tail of the dim-16
+        // schedule: the output row is always full range and no row gets less precision than
+        // it had at dim 16. Identical to the defaults at dim = 16. lib/golden/mx_golden.cpp
+        // mirrors this with MX_GOLDEN_DIM.
+        meshProdPrecisionList = GemminiMxFPConfigs.defaultMxFPConfig.meshProdPrecisionList.takeRight(dim),
+        meshAccPrecisionList = GemminiMxFPConfigs.defaultMxFPConfig.meshAccPrecisionList.takeRight(dim),
         // acc_read_full_width = false, // set to true to output fp32
         num_counter = 0,
         // dataflow = Dataflow.WS,
@@ -411,6 +420,13 @@ class WithRadianceMxGemmini(location: HierarchicalLocation, crossing: RocketCros
         dma_maxbytes = up(CacheBlockBytes),
         dma_buswidth = up(CacheBlockBytes) * 8,
         tl_ext_mem_base = clusterParams.baseAddr, // TODO: no longer need this with address rewriting
+        // The DMA scratchpad writer's bus is one SMEM word wide (RadianceSharedMemComponents puts
+        // TLFragmenter/TLWidthWidget(smemWidth) in front of it), so its beat must be one word too.
+        // The defaults (512 bits / 64 bytes) match a 64-byte word only; with 32-byte words (dim 8)
+        // the writer built 64-byte single-beat packets and every write at a word offset of 32
+        // (each second half-row) lost its data to the narrower bus.
+        spad_writer_dma_width = smKey.numWords * smKey.wordSize * 8,
+        max_spad_writer_bytes = smKey.numWords * smKey.wordSize,
         sp_banks = smKey.numBanks,
         sp_capacity = CapacityInKilobytes(smKey.size >> 10),
         acc_capacity = CapacityInKilobytes(accSizeInKB),
@@ -428,6 +444,12 @@ class WithRadianceMxGemmini(location: HierarchicalLocation, crossing: RocketCros
         baseAddr = clusterParams.baseAddr + smKey.size * 2, // must be aligned
         numGPUInputLanes = simt.numLanes,
         // numOutputLanes = 32,
+        // 32 -> 2*dim: numOutputLanes was pinned at its class default (32) regardless of
+        // dim, even though every consumer (40 usages across 6 gemmini + 3 radiance files)
+        // already reads it as a live parameter, not a literal. 32 = 2*16 at the only dim
+        // ever used; reshaped_pipelined_out_0 (MxRequantizer.scala) independently confirmed
+        // it needs to be 2*dim (=16 at dim=8) to match the accumulator's actual data width.
+        numOutputLanes = 2 * dim,
         // gpuMaxFactor = 2,
         // gpuWordSize = 4,
         // inputBits = 16,

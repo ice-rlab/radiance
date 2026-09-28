@@ -63,6 +63,19 @@ object TapeoutSmemConfig extends RadianceSharedMemKey(
   prealignBufDepth = 2, filterAligned = false, serialization = CoreSerialized
 )
 
+// Paired with dim=8 Gemmini + numLanes=numLsuLanes=8 in RadianceSingleClusterSynConfig only.
+// numWords must equal numLsuLanes (RadianceSharedMem.scala smemSubbanks coupling), so with
+// numLsuLanes=8, numWords=8 -- wordSize stays at 4 (UNCHANGED from TapeoutSmemConfig) this
+// time. smemWidth = 8*4 = 32; with dim=8's sp_width/8=12, 32/12 truncates to 2 (a power of
+// 2), satisfying RadianceSharedMemComponents.scala:37 -- without touching wordSize like the
+// earlier numLanes=16 attempt had to, which is what caused the unresolved TileLink Xbar
+// width mismatch (muon_aligned_splitter_manager vs gemmini/ram/tlnbdCache). Keeping
+// wordSize=4 here should avoid that specific conflict.
+object TapeoutSmemConfigDim8 extends RadianceSharedMemKey(
+  address = 0, size = 128 << 10, numBanks = 4, numWords = 8, wordSize = 4,
+  prealignBufDepth = 2, filterAligned = false, serialization = CoreSerialized
+)
+
 object L0iCacheConfig extends DCacheParams(
   nSets = 512,
   nWays = 1,
@@ -103,7 +116,12 @@ object L1CacheConfig extends DCacheParams(
   nWays = 4,
   rowBits = 32 * 8, // physical (sram) size
   blockBytes = 32, // logical size
-  nMSHRs = 8, // maybe be able to decrease this
+  nMSHRs = 8,
+  // nWays=2/nMSHRs=4 tried (Tier 1 LUT-reduction attempt): INCREASED LUT usage vs this
+  // default (1,213,834/1,252,425 Logic/Slice combined with numSMEMInFlights=4, vs
+  // 1,189,077/1,227,750 baseline). Every attempted core-internal parameter reduction so far
+  // (numWarps, nWays, nMSHRs, numSMEMInFlights, alone or combined) has made LUT usage worse,
+  // not better -- reverted to defaults, which remain the best result found.
 )
 
 object L1CacheHugeConfig extends DCacheParams(
@@ -258,9 +276,27 @@ class RadianceSingleClusterConfig extends Config(
 )
 
 class RadianceSingleClusterSynConfig extends Config(
-  new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
-  new WithMuonCores(2, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = false, profiler = false) ++
-  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
+  // dim=8 retry #2: Controller.scala/Scratchpad.scala hardcoded-16 fixed (see those files),
+  // and MxRequantizer.scala's half_lanes=16 also fixed now that numLanes is changing too.
+  // numLanes=numLsuLanes=8 chosen (matching dim) so numWords=8 keeps wordSize=4 UNCHANGED
+  // (see TapeoutSmemConfigDim8 comment) -- avoids the wordSize=2 TileLink Xbar mismatch the
+  // previous numLanes=16 attempt hit.
+  // new WithRadianceMxGemmini(location = InCluster(0), dim = 16, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
+  new WithRadianceMxGemmini(location = InCluster(0), dim = 8, accSizeInKB = 32, tileSize = (8, 8, 8)) ++
+  // WithMuonCores reads SIMTCoreKey via up(...) (Configs.scala:91), not site(...), so this
+  // override must come AFTER WithMuonCores in the chain, not before -- up() only sees configs
+  // positioned after the caller. WithRadianceMxGemmini uses site(...) (Configs.scala:427), so
+  // it correctly saw this override regardless of position; WithMuonCores silently didn't,
+  // keeping numLanes/numLsuLanes at 16 (confirmed via debug print) despite this override.
+  // numLanes = Some(8) also passed directly: WithMuonCores' intPipe/fpPipe (execution-unit
+  // lane counts, e.g. numALULanes) are derived from its OWN numLanes: Option[Int] constructor
+  // param via numLanes.map{...}, NOT from the SIMTCoreKey fallback -- left unset, they silently
+  // fall back to MuonCoreParams()'s bare default (IntPipeParams(16,16)), a THIRD independent
+  // path that the WithSIMTConfig override alone doesn't reach.
+  new WithMuonCores(1, location = InCluster(0), l0i = Some(L0iCacheConfig), l0d = Some(L0dCacheConfig), trace = false, profiler = false, numLanes = Some(8)) ++
+  new WithSIMTConfig(numWarps = 8, numLanes = 8, numLsuLanes = 8, numSMEMInFlights = 8) ++
+  // new WithRadianceCluster(0, smemConfig = TapeoutSmemConfig, l1Config = L1CacheConfig) ++
+  new WithRadianceCluster(0, smemConfig = TapeoutSmemConfigDim8, l1Config = L1CacheConfig) ++
   new WithExtGPUMem() ++
   new WithRadianceRocket ++
   new WithGPUResetAggregator(defaultReset = true) ++

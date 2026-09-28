@@ -21,6 +21,7 @@ import org.chipsalliance.diplomacy.DisableMonitors
 import org.chipsalliance.diplomacy.lazymodule._
 import radiance.memory._
 import radiance.subsystem.{GPUMemParams, GPUMemory, GemminiTileLike, PhysicalCoreParams}
+import midas.targetutils.PerfCounter
 
 object GemminiCoreParams extends PhysicalCoreParams {
   override val xLen: Int = 64
@@ -297,7 +298,7 @@ class GemminiTileModuleImp(outer: GemminiTile) extends BaseTileModuleImp(outer) 
       fromSource = 0.U, // overridden
       toAddress = out.bits.addr,
       lgSize = log2Ceil(node.params.dataBits / 8).U,
-      data = out.bits.data,
+    data = out.bits.data,
     )._2
 
     val (sourceReady, _) = SourceGenerator(node)
@@ -322,7 +323,8 @@ class GemminiTileModuleImp(outer: GemminiTile) extends BaseTileModuleImp(outer) 
 
       in.valid := node.a.valid
       in.bits.dataType := RequantizerDataType.FP8
-      in.bits.address := ((node.a.bits.address - q.baseAddr.U) >> 1).asTypeOf(in.bits.address) // hardcoded 16->8
+      // GPU input word bytes -> output byte address: inputBits/8 bytes per element (was a hardcoded >> 1, 16->8)
+      in.bits.address := ((node.a.bits.address - q.baseAddr.U) >> log2Ceil(q.inputBits / 8)).asTypeOf(in.bits.address)
       in.bits.data := node.a.bits.data.asTypeOf(in.bits.data)
 
       require(in.bits.data.asUInt.getWidth == node.a.bits.data.getWidth)
@@ -393,10 +395,31 @@ class GemminiTileModuleImp(outer: GemminiTile) extends BaseTileModuleImp(outer) 
   val gemminiRs2RegLSB = RegInit(0.U(32.W))
   val gemminiRs2RegMSB = RegInit(0.U(32.W))
 
+  // --- Configuration-Wall / G2Stack instrumentation strobes ---
+  // One-cycle pulses marking each configuration-register write, so the
+  // GCStack-style classifier below can see the "Configure" phase traffic that
+  // the plain RegFields would otherwise absorb silently.
+  val rs1WrStrobe  = WireDefault(false.B)
+  val rs2WrStrobe  = WireDefault(false.B)
+  val ciscWrStrobe = WireDefault(false.B)
+  val lutWrStrobe  = WireDefault(false.B)
+
   def gemminiCommandReg(valid: Bool, bits: UInt): Bool = {
     regValid := valid
     regCommand := bits.asTypeOf(regCommand)
     gemminiIO.ready && !cisc.ciscValid
+  }
+
+  // Latch a configuration register and pulse `strobe` on each write, so the
+  // Configuration-Wall instrumentation can observe Configure-phase traffic.
+  // Datapath behaviour matches the plain RegField.w(reg) it replaces
+  // (latch on write, always ready).
+  def stagingReg(reg: UInt, strobe: Bool)(valid: Bool, bits: UInt): Bool = {
+    when (valid) {
+      reg := bits
+      strobe := true.B
+    }
+    true.B
   }
 
   def gemminiBusyReg(_dReady: Bool): (Bool, UInt) = {
@@ -420,11 +443,11 @@ class GemminiTileModuleImp(outer: GemminiTile) extends BaseTileModuleImp(outer) 
     0x00 -> Seq(RegField.w(32, gemminiCommandReg(_, _))),
     0x08 -> Seq(RegField.r(32, gemminiIO.ready)),
     0x10 -> Seq(
-      RegField.w(32, gemminiRs1RegLSB),
-      RegField.w(32, gemminiRs1RegMSB)),
+      RegField.w(32, stagingReg(gemminiRs1RegLSB, rs1WrStrobe)(_, _)),
+      RegField.w(32, stagingReg(gemminiRs1RegMSB, rs1WrStrobe)(_, _))),
     0x18 -> Seq(
-      RegField.w(32, gemminiRs2RegLSB),
-      RegField.w(32, gemminiRs2RegMSB)),
+      RegField.w(32, stagingReg(gemminiRs2RegLSB, rs2WrStrobe)(_, _)),
+      RegField.w(32, stagingReg(gemminiRs2RegMSB, rs2WrStrobe)(_, _))),
     0x20 -> Seq(RegField.r(32, gemminiBusyReg(_))),
     0x28 -> Seq(RegField.r(32, gemminiRunningLoopsReg(_))),
   )
@@ -433,6 +456,7 @@ class GemminiTileModuleImp(outer: GemminiTile) extends BaseTileModuleImp(outer) 
     def gemminiCisc(valid: Bool, bits: UInt): Bool = {
       cisc.accCommandQueue.io.enq.bits := bits
       cisc.accCommandQueue.io.enq.valid := valid
+      when (valid) { ciscWrStrobe := true.B }
       true.B
     }
     0x30 -> Seq(RegField.w(32, gemminiCisc(_, _)))
@@ -461,6 +485,7 @@ class GemminiTileModuleImp(outer: GemminiTile) extends BaseTileModuleImp(outer) 
         def lut(valid: Bool, bits: UInt): Bool = {
           when (io.ready && valid) {
             reg := bits
+            lutWrStrobe := true.B
           }
           if (trigger) {
             // this assumes ready never lowers without a fire first
@@ -501,6 +526,101 @@ class GemminiTileModuleImp(outer: GemminiTile) extends BaseTileModuleImp(outer) 
     cisc.ciscInst.rs2, Cat(gemminiRs2RegMSB, gemminiRs2RegLSB))
   gemminiIO.valid := (cisc.ciscValid && (cisc.ciscInst.inst =/= 0.U)) || regValid
   // assert(gemminiIO.ready || !gemminiIO.valid)
+
+  // ===========================================================================
+  // Configuration-Wall cycle-stall accounting ("G2Stack")
+  //
+  // GCStack-style per-cycle classifier (cf. Muon Backend.scala): every cycle
+  // the Gemmini command engine lands in exactly ONE bucket, so -- normalized by
+  // local_cycle in the post-run hook -- the five fractions sum to 1.00. Buckets
+  // follow the Configuration Wall model's Configure / Launch / Await phases
+  // (Van Delm et al., ASPLOS'26). `memData` (data-movement stall) is split out
+  // of `compute` using GemminiModule.perf_io.mem_stall, threaded up from the
+  // submodule -- the paper (Sec 2.3) treats data movement as orthogonal to
+  // configuration, so it must be its own bucket.
+  //
+  // Priority (top wins). memData is checked FIRST so that any exposed memory
+  // time -- including a load's in-flight response latency, when the mesh is
+  // idle waiting for data -- is attributed to memData and never leaks into
+  // `idle` or `compute`:
+  //   mem_stall                -> memData    (DMA in progress while mesh not computing)
+  //   busy                     -> compute    (mesh running; overlapped mem/config hidden)
+  //   cmd offered but rejected -> awaitStall (sequential-config wall: 0x00 store blocked)
+  //   config-register traffic  -> configWrite (Configure phase, exposed)
+  //   work command committed    -> launch     (Launch phase, exposed)
+  //   otherwise                -> idle       (engine unfed by Muon)
+  // ===========================================================================
+  {
+    val busy        = outer.gemmini.module.io.busy
+    // memData = all exposed memory-communication time: a load/store transfer is
+    // in progress (incl. in-flight response latency) while the mesh isn't
+    // computing. Subsumes TLB-miss, XactTracker-full, TileLink backpressure,
+    // and DMA response latency; excludes memory hidden behind compute.
+    val memStall      = outer.gemmini.module.perf_io.mem_stall
+    val loadMemStall  = outer.gemmini.module.perf_io.load_mem_stall
+    val storeMemStall = outer.gemmini.module.perf_io.store_mem_stall
+    val cmdOffered  = gemminiIO.valid
+    val cmdReady    = gemminiIO.ready
+    val isConfigCmd = regValid && (regCommand.funct === GemminiISA.CONFIG_CMD)
+    val isWorkCmd   = regValid && (regCommand.funct =/= GemminiISA.CONFIG_CMD)
+    val configTraffic = rs1WrStrobe || rs2WrStrobe || ciscWrStrobe || lutWrStrobe || isConfigCmd
+
+    val ggBucket = WireDefault(0.U(3.W)) // 0 = idle
+    when      (memStall)                { ggBucket := 5.U } // memData
+    .elsewhen (busy)                    { ggBucket := 1.U } // compute
+    .elsewhen (cmdOffered && !cmdReady) { ggBucket := 4.U } // awaitStall
+    .elsewhen (configTraffic)           { ggBucket := 2.U } // configWrite
+    .elsewhen (isWorkCmd)               { ggBucket := 3.U } // launch
+
+    // GCStack-style stall stack (mutually exclusive; raw counts sum to local_cycle).
+    midas.targetutils.PerfCounter(ggBucket === 0.U, "ggstack_idle",        "gemmini: engine idle, unfed by Muon")
+    midas.targetutils.PerfCounter(ggBucket === 1.U, "ggstack_compute",     "gemmini: busy doing useful compute")
+    midas.targetutils.PerfCounter(ggBucket === 2.U, "ggstack_configwrite", "gemmini: exposed Configure-phase register writes")
+    midas.targetutils.PerfCounter(ggBucket === 3.U, "ggstack_launch",      "gemmini: exposed Launch (work command committed)")
+    midas.targetutils.PerfCounter(ggBucket === 4.U, "ggstack_awaitstall",  "gemmini: sequential-config wall (0x00 store blocked)")
+    midas.targetutils.PerfCounter(ggBucket === 5.U, "ggstack_memdata",     "gemmini: busy but stalled on mvin/mvout memory comms")
+
+    // Ground-truth total in the SAME clock domain as the six buckets above:
+    // by construction Sum(ggstack_{idle,compute,configwrite,launch,awaitstall,
+    // memdata}) === ggstack_total_cycles, every cycle, so the post-run hook can
+    // divide each bucket by this and get fractions that sum to exactly 1.00
+    // -- independent of local_cycle's reset/clock domain. This counts every
+    // tile cycle (the tile is not clock-gated; only Gemmini's internals are).
+    // PerfCounter's annotation needs a named hardware node -- a bare `true.B`
+    // literal has no FIRRTL target ("Illegal component name ... literals are
+    // illegal"), so give it one via a WireDefault.
+    val alwaysTrue = WireDefault(true.B)
+    midas.targetutils.PerfCounter(alwaysTrue, "ggstack_total_cycles", "gemmini tile: total classified cycles (== sum of ggstack_* buckets)")
+
+    // Free-running configuration-volume counters (NOT part of the stack; they
+    // fire even when overlapped behind compute) for the roofline metrics:
+    //   N_config_bytes = 8*(rs1_writes + rs2_writes) + CISC/LUT volume
+    //   I_OC           = accelerator_ops / N_config_bytes
+    // NOTE: rs1/rs2 are each 8 bytes wide but split across two 32-bit
+    // RegFields (LSB @ +0x00, MSB @ +0x04), both wired to the SAME strobe --
+    // so each *counts a 32-bit word write*, not a full 64-bit rs1/rs2 write.
+    // (Confirmed empirically: rs1_word_writes == 2x cmd_fires on real runs,
+    // i.e. LSB and MSB land as separate TileLink beats.) Byte accounting
+    // below uses 4 bytes/pulse accordingly.
+    midas.targetutils.PerfCounter(rs1WrStrobe,    "ggcfg_rs1_word_writes", "gemmini: rs1 32b word writes (x4 bytes each; 2 per rs1 store)")
+    midas.targetutils.PerfCounter(rs2WrStrobe,    "ggcfg_rs2_word_writes", "gemmini: rs2 32b word writes (x4 bytes each; 2 per rs2 store)")
+    midas.targetutils.PerfCounter(ciscWrStrobe,   "ggcfg_cisc_writes",   "gemmini: CISC compressed-config writes (0x30)")
+    midas.targetutils.PerfCounter(lutWrStrobe,    "ggcfg_lut_writes",    "gemmini: LUT config-table word writes (0x80+)")
+    midas.targetutils.PerfCounter(isConfigCmd,    "ggcfg_config_cmds",   "gemmini: CONFIG_CMD launches (funct==0)")
+    midas.targetutils.PerfCounter(isWorkCmd,      "ggcfg_work_launches", "gemmini: work-command launches (funct!=0)")
+    midas.targetutils.PerfCounter(gemminiIO.fire, "ggcfg_cmd_fires",     "gemmini: commands accepted into the reservation station")
+
+    // Per-path memData breakdown (diagnostic; overlaps the memData bucket).
+    midas.targetutils.PerfCounter(loadMemStall,   "ggmem_load_stall",    "gemmini: mvin/load DMA stalled (TLB/xact/TL backpressure)")
+    midas.targetutils.PerfCounter(storeMemStall,  "ggmem_store_stall",   "gemmini: mvout/store DMA stalled (TLB/xact/TL backpressure)")
+
+    val activeMacs = outer.gemmini.module.perf_io.active_macs
+    val nPEs = outer.gemminiParams.gemminiConfig.DIM * outer.gemminiParams.gemminiConfig.DIM
+
+    midas.targetutils.PerfCounter(activeMacs, "ggmac_active_macs",
+      "gemmini: sum of active PE MACs per cycle (integrated MAC-cycles; /(DIM^2*cycles) = utilization)")
+   
+  }
 
   outer.traceSourceNode.bundle := DontCare
   outer.traceSourceNode.bundle.insns foreach (_.valid := false.B)
