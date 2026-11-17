@@ -115,6 +115,11 @@ case class VortexCoreParams(
   val instBits: Int = if (useCompressed) 16 else 32
   val lrscCycles: Int = 80 // worst case is 14 mispredicted branches + slop
   val traceHasWdata: Boolean = false // ooo wb, so no wdata in trace
+  // CTR/MAR from the ice-rlab rocket-chip; not implemented by Vortex.
+  val useCTR: Boolean = false
+  val nCTREntries: Int = 0
+  val useMAR: Boolean = false
+  val nMAREntries: Int = 0
 }
 
 class VortexTile private(

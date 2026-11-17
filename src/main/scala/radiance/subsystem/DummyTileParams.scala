@@ -53,6 +53,12 @@ trait PhysicalCoreParams extends CoreParams {
   val mcontextWidth: Int = 0
   val scontextWidth: Int = 0
   val nPerfCounters: Int = 0
+  // Control transfer records (CTR) and memory access records (MAR) from the
+  // ice-rlab rocket-chip; Radiance cores implement neither.
+  val useCTR: Boolean = false
+  val nCTREntries: Int = 0
+  val useMAR: Boolean = false
+  val nMAREntries: Int = 0
   val haveBasicCounters: Boolean = true
   val haveFSDirty: Boolean = false
   val misaWritable: Boolean = false
