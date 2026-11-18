@@ -544,11 +544,22 @@ class GemminiTileModuleImp(outer: GemminiTile) extends BaseTileModuleImp(outer) 
   // idle waiting for data -- is attributed to memData and never leaks into
   // `idle` or `compute`:
   //   mem_stall                -> memData    (DMA in progress while mesh not computing)
-  //   busy                     -> compute    (mesh running; overlapped mem/config hidden)
   //   cmd offered but rejected -> awaitStall (sequential-config wall: 0x00 store blocked)
+  //   busy                     -> compute    (busy with no command held back; overlapped
+  //                                           mem/config hidden)
   //   config-register traffic  -> configWrite (Configure phase, exposed)
   //   work command committed    -> launch     (Launch phase, exposed)
   //   otherwise                -> idle       (engine unfed by Muon)
+  //
+  // awaitStall MUST be checked before busy. Gemmini's io.cmd.ready is low only when its
+  // 2-entry raw_cmd queue is full (Controller.scala: io.cmd.ready := raw_cmd_q.io.enq.ready),
+  // and io.busy includes raw_cmd.valid, so "offered && !ready" implies busy. With busy first
+  // (the original order) awaitStall was unreachable: a bench that queued 32 matmuls back to
+  // back had a command held for ~916k of 1.05M cycles and read awaitStall 0.0000, compute
+  // 0.9999 (gcstack_ubench/bench_gg_awaitstall.cpp, 2026-11-12). Now compute + awaitStall
+  // together are the busy-with-no-memory-stall time, and awaitStall is the part of it in
+  // which Muon is blocked behind Gemmini. memData stays first, so a command held during a
+  // DMA-only phase still reads as memData.
   // ===========================================================================
   {
     val busy        = outer.gemmini.module.io.busy
@@ -567,8 +578,8 @@ class GemminiTileModuleImp(outer: GemminiTile) extends BaseTileModuleImp(outer) 
 
     val ggBucket = WireDefault(0.U(3.W)) // 0 = idle
     when      (memStall)                { ggBucket := 5.U } // memData
+    .elsewhen (cmdOffered && !cmdReady) { ggBucket := 4.U } // awaitStall (before busy: see above)
     .elsewhen (busy)                    { ggBucket := 1.U } // compute
-    .elsewhen (cmdOffered && !cmdReady) { ggBucket := 4.U } // awaitStall
     .elsewhen (configTraffic)           { ggBucket := 2.U } // configWrite
     .elsewhen (isWorkCmd)               { ggBucket := 3.U } // launch
 

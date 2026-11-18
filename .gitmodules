@@ -3,7 +3,7 @@
 	url = https://github.com/hansungk/vortex.git
 [submodule "cyclotron"]
 	path = cyclotron
-	url = https://github.com/hansungk/cyclotron.git
+	url = git@github.com:ice-rlab/cyclotron.git
 [submodule "src/main/resources/vsrc/cvfpu"]
 	path = src/main/resources/vsrc/cvfpu
 	url = https://github.com/richardyrh/cvfpu.git
